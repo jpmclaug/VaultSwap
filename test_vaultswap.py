@@ -718,6 +718,52 @@ def test_admin_users_page_access_and_add(app, client):
     assert db.session.get(User, new_u.id) is None
 
 
+def test_activity_logging_for_login_and_uploads(app, client):
+    from models import ActivityLog
+
+    app.config["INVITE_ONLY"] = True
+    app.config["ADMIN_EMAILS"] = {"admin@pod.local"}
+
+    # 1. Admin login generates an ActivityLog record
+    client.post("/auth/dev-login", data={"email": "admin@pod.local", "display_name": "Admin Boss"})
+    admin_login_log = ActivityLog.query.filter_by(action="LOGIN_DEV").first()
+    assert admin_login_log is not None
+    assert admin_login_log.user_email == "admin@pod.local"
+    assert "Admin Boss" in (admin_login_log.user_name or "")
+
+    # 2. Uploading a single card logs an upload event
+    client.post("/import", data={"single_card_name": "Sol Ring", "single_quantity": "1"})
+    upload_log = ActivityLog.query.filter_by(action="ADD_SINGLE").first()
+    assert upload_log is not None
+    assert upload_log.user_email == "admin@pod.local"
+    assert "Sol Ring" in upload_log.details
+
+    # 3. Uploading quick text list logs an upload event
+    client.post("/import", data={"quick_text": "1 Lightning Bolt"})
+    quick_log = ActivityLog.query.filter_by(action="UPLOAD_QUICK_LIST").first()
+    assert quick_log is not None
+    assert "Quick Text Paste" in quick_log.details
+
+    # 4. Admin users page renders the activity logs section and filter tabs
+    admin_page = client.get("/admin/users").get_data(as_text=True)
+    assert "User Action &amp; Audit Log" in admin_page
+    assert "LOGIN_DEV" in admin_page
+    assert "ADD_SINGLE" in admin_page
+    assert "admin@pod.local" in admin_page
+
+    # 5. Filtering activity logs by action=uploads only returns upload logs
+    uploads_filter_page = client.get("/admin/users?action=uploads").get_data(as_text=True)
+    assert "ADD_SINGLE" in uploads_filter_page
+    assert "LOGIN_DEV" not in uploads_filter_page
+
+    # 6. Logout logs an event
+    client.get("/logout")
+    logout_log = ActivityLog.query.filter_by(action="LOGOUT").first()
+    assert logout_log is not None
+    assert logout_log.user_email == "admin@pod.local"
+
+
+
 def test_parse_card_date_formats():
     from datetime import timezone
     from drive_sync import parse_card_date
@@ -1028,5 +1074,369 @@ def test_drive_client_open_csv_stream_handles_urllib3_eof():
     assert len(scan.new_entries) == 2
     assert scan.new_entries[0][2]["name"] == "Sol Ring"
     assert scan.new_entries[1][2]["name"] == "Rhystic\nStudy"
+
+
+def test_mcp_privacy_boundary_excludes_private_cards(app, client):
+    import mcp_server
+
+    alice = _login_user(client, "alice_mcp@pod.local", "Alice Johnson", discord_handle="@alice_j")
+    bob = _login_user(client, "bob_mcp@pod.local", "Bob Smith", discord_handle="@bob_s")
+
+    mana_crypt = _make_card("Mana Crypt", "2XM", "270", usd_price=95.00)
+    sol_ring = _make_card("Sol Ring", "CMM", "410", usd_price=2.50)
+    rhystic = _make_card("Rhystic Study", "WOT", "25", usd_price=40.00)
+    fow = _make_card("Force of Will", "DMR", "50", usd_price=75.00)
+
+    alice_priv = BinderItem(user_id=alice.id, scryfall_id=mana_crypt.scryfall_id, quantity=1, status="private")
+    alice_trade = BinderItem(user_id=alice.id, scryfall_id=sol_ring.scryfall_id, quantity=2, status="for_trade")
+    bob_meeple = BinderItem(user_id=bob.id, scryfall_id=rhystic.scryfall_id, quantity=1, status="meeple_bound")
+    bob_priv = BinderItem(user_id=bob.id, scryfall_id=fow.scryfall_id, quantity=1, status="private")
+    db.session.add_all([alice_priv, alice_trade, bob_meeple, bob_priv])
+    db.session.commit()
+
+    feed = mcp_server.list_trade_cards()
+    assert feed["total_matching"] == 2
+    names = {entry["card"]["name"] for entry in feed["listings"]}
+    assert names == {"Sol Ring", "Rhystic Study"}
+
+    for entry in feed["listings"]:
+        assert "email" not in entry["owner"]
+        assert "google_sub" not in entry["owner"]
+
+    # Rejects status='private'
+    priv_query = mcp_server.list_trade_cards(status="private")
+    assert "error" in priv_query
+    assert priv_query["listings"] == []
+
+    # Direct lookup by private item_id, scryfall_id, or card_name returns nothing
+    assert mcp_server.get_trade_card_metadata(item_id=alice_priv.id)["found"] is False
+    assert mcp_server.get_trade_card_metadata(scryfall_id=mana_crypt.scryfall_id)["found"] is False
+    assert mcp_server.get_trade_card_metadata(card_name="Mana Crypt")["found"] is False
+
+    with pytest.raises(ValueError):
+        mcp_server.serialize_trade_item(alice_priv)
+
+    traders = mcp_server.list_pod_traders()
+    assert traders["trader_count"] == 2
+    by_uid = {t["user_id"]: t for t in traders["traders"]}
+    assert by_uid[alice.id]["total_quantity"] == 2
+    assert by_uid[bob.id]["total_quantity"] == 1
+
+    summary = mcp_server.get_pod_trade_summary()
+    assert summary["total_listings"] == 2
+    assert summary["total_cards_available"] == 3
+
+
+def test_mcp_list_trade_cards_filters_sorting_and_metadata(app, client):
+    import mcp_server
+
+    alice = _login_user(client, "alice_f@pod.local", "Alice Mercer", discord_handle="@alice_mtg")
+    bob = _login_user(client, "bob_f@pod.local", "Bob Vance", discord_handle="@bob_mtg")
+
+    c_ring = Card(
+        scryfall_id=str(uuid.uuid4()),
+        oracle_id=str(uuid.uuid4()),
+        name="Sol Ring",
+        set_code="CMM",
+        collector_number="410",
+        set_name="Commander Masters",
+        image_uri_normal="https://cards.scryfall.io/normal/cmm/410.jpg",
+        image_uri_small="https://cards.scryfall.io/small/cmm/410.jpg",
+        mana_cost="{1}",
+        type_line="Artifact",
+        usd_price=2.00,
+        usd_foil_price=12.00,
+    )
+    c_tutor = Card(
+        scryfall_id=str(uuid.uuid4()),
+        oracle_id=str(uuid.uuid4()),
+        name="Demonic Tutor",
+        set_code="CMM",
+        collector_number="150",
+        set_name="Commander Masters",
+        mana_cost="{1}{B}",
+        type_line="Sorcery",
+        usd_price=35.00,
+        usd_foil_price=55.00,
+    )
+    c_etched = Card(
+        scryfall_id=str(uuid.uuid4()),
+        oracle_id=str(uuid.uuid4()),
+        name="Urza's Saga",
+        set_code="MH2",
+        collector_number="259",
+        set_name="Modern Horizons 2",
+        mana_cost="",
+        type_line="Enchantment Land — Urza's Saga",
+        usd_price=38.00,
+        usd_foil_price=48.00,
+    )
+    db.session.add_all([c_ring, c_tutor, c_etched])
+    db.session.flush()
+
+    now = utc_now()
+    item_ring = BinderItem(
+        user_id=alice.id,
+        scryfall_id=c_ring.scryfall_id,
+        quantity=2,
+        finish="foil",
+        condition="NM",
+        status="for_trade",
+        mm_in_stock=True,
+        mm_retail_price=14.00,
+        mm_buylist_cash=6.50,
+        mm_buylist_credit=8.50,
+        mm_checked_at=now,
+    )
+    item_tutor = BinderItem(
+        user_id=bob.id,
+        scryfall_id=c_tutor.scryfall_id,
+        quantity=1,
+        finish="nonfoil",
+        condition="LP",
+        status="meeple_bound",
+        mm_in_stock=False,
+        mm_retail_price=35.00,
+        mm_buylist_cash=18.00,
+        mm_buylist_credit=23.00,
+        mm_checked_at=now - timedelta(minutes=5),
+    )
+    item_saga = BinderItem(
+        user_id=alice.id,
+        scryfall_id=c_etched.scryfall_id,
+        quantity=1,
+        finish="etched",
+        condition="NM",
+        status="for_trade",
+        mm_checked_at=None,
+    )
+    db.session.add_all([item_ring, item_tutor, item_saga])
+    db.session.commit()
+
+    # Priority sort puts meeple_bound first
+    all_res = mcp_server.list_trade_cards(sort_by="priority")
+    assert all_res["total_matching"] == 3
+    assert all_res["listings"][0]["listing"]["status"] == "meeple_bound"
+    assert all_res["listings"][0]["card"]["name"] == "Demonic Tutor"
+
+    # Verify full 4-block metadata on foil item_ring
+    ring_res = mcp_server.list_trade_cards(query="Sol Ring")
+    assert ring_res["total_matching"] == 1
+    ring_meta = ring_res["listings"][0]
+    assert ring_meta["listing"]["item_id"] == item_ring.id
+    assert ring_meta["listing"]["unit_market_price"] == 12.00
+    assert ring_meta["listing"]["line_market_value"] == 24.00
+    assert ring_meta["card"]["set_code"] == "CMM"
+    assert ring_meta["card"]["scryfall_uri"] == "https://scryfall.com/card/cmm/410"
+    assert ring_meta["owner"]["handle_label"] == "@Alice"
+    assert ring_meta["owner"]["discord_handle"] == "@alice_mtg"
+    assert ring_meta["mighty_meeple"]["has_snapshot"] is True
+    assert ring_meta["mighty_meeple"]["in_stock"] is True
+    assert ring_meta["mighty_meeple"]["buylist_cash"] == 6.50
+    assert ring_meta["mighty_meeple"]["line_buylist_cash"] == 13.00
+    assert ring_meta["mighty_meeple"]["buylist_credit"] == 8.50
+    assert ring_meta["mighty_meeple"]["line_buylist_credit"] == 17.00
+
+    # Filters
+    assert mcp_server.list_trade_cards(status="for_trade")["total_matching"] == 2
+    assert mcp_server.list_trade_cards(status="meeple_bound")["total_matching"] == 1
+    assert mcp_server.list_trade_cards(owner="@Alice")["total_matching"] == 2
+    assert mcp_server.list_trade_cards(owner="bob_mtg")["total_matching"] == 1
+    assert mcp_server.list_trade_cards(owner=str(bob.id))["total_matching"] == 1
+    assert mcp_server.list_trade_cards(set_code="cmm")["total_matching"] == 2
+    assert mcp_server.list_trade_cards(type_line="Artifact")["total_matching"] == 1
+    assert mcp_server.list_trade_cards(finish="etched")["total_matching"] == 1
+    assert mcp_server.list_trade_cards(condition="lightly played")["total_matching"] == 1
+    assert mcp_server.list_trade_cards(min_price=10.0, max_price=40.0)["total_matching"] == 2
+    assert mcp_server.list_trade_cards(meeple_in_stock=True)["total_matching"] == 1
+    assert mcp_server.list_trade_cards(meeple_in_stock=False)["total_matching"] == 1
+
+    # Price & name sorting
+    desc_names = [x["card"]["name"] for x in mcp_server.list_trade_cards(sort_by="price_desc")["listings"]]
+    assert desc_names == ["Urza's Saga", "Demonic Tutor", "Sol Ring"]
+    asc_names = [x["card"]["name"] for x in mcp_server.list_trade_cards(sort_by="price_asc")["listings"]]
+    assert asc_names == ["Sol Ring", "Demonic Tutor", "Urza's Saga"]
+    alpha_names = [x["card"]["name"] for x in mcp_server.list_trade_cards(sort_by="name_asc")["listings"]]
+    assert alpha_names == ["Demonic Tutor", "Sol Ring", "Urza's Saga"]
+
+
+def test_mcp_get_trade_card_metadata_cross_printing_and_live_scryfall(app, client):
+    import mcp_server
+
+    alice = _login_user(client, "alice_x@pod.local", "Alice")
+    bob = _login_user(client, "bob_x@pod.local", "Bob")
+    charlie = _login_user(client, "charlie_x@pod.local", "Charlie")
+
+    shared_oracle = str(uuid.uuid4())
+    rhystic_wot = _make_card("Rhystic Study", "WOT", "25", oracle_id=shared_oracle, usd_price=42.00)
+    rhystic_pcy = _make_card("Rhystic Study", "PCY", "45", oracle_id=shared_oracle, usd_price=38.00)
+    rhystic_cmm = _make_card("Rhystic Study", "CMM", "114", oracle_id=shared_oracle, usd_price=39.00)
+
+    alice_wot = BinderItem(
+        user_id=alice.id,
+        scryfall_id=rhystic_wot.scryfall_id,
+        quantity=1,
+        finish="nonfoil",
+        status="for_trade",
+        mm_checked_at=None,
+    )
+    bob_pcy = BinderItem(
+        user_id=bob.id,
+        scryfall_id=rhystic_pcy.scryfall_id,
+        quantity=2,
+        finish="nonfoil",
+        status="meeple_bound",
+    )
+    # Private copy in CMM must NOT leak into other_printings_in_pod
+    charlie_priv_cmm = BinderItem(
+        user_id=charlie.id,
+        scryfall_id=rhystic_cmm.scryfall_id,
+        quantity=1,
+        finish="nonfoil",
+        status="private",
+    )
+    # A 24h pod-cached Mighty Meeple snapshot on the exact WOT printing
+    charlie_wot_cache = BinderItem(
+        user_id=charlie.id,
+        scryfall_id=rhystic_wot.scryfall_id,
+        quantity=1,
+        finish="nonfoil",
+        status="private",
+        mm_in_stock=True,
+        mm_retail_price=44.00,
+        mm_buylist_cash=24.00,
+        mm_buylist_credit=31.00,
+        mm_checked_at=utc_now() - timedelta(hours=2),
+    )
+    db.session.add_all([alice_wot, bob_pcy, charlie_priv_cmm, charlie_wot_cache])
+    db.session.commit()
+
+    sf_resp = MagicMock(status_code=200)
+    sf_resp.json.return_value = {
+        "oracle_text": "Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.",
+        "cmc": 3.0,
+        "colors": ["U"],
+        "color_identity": ["U"],
+        "rarity": "mythic",
+        "keywords": [],
+        "legalities": {"commander": "legal", "legacy": "legal", "standard": "not_legal"},
+        "edhrec_rank": 3,
+        "artist": "Fay Jones",
+        "rulings_uri": "https://api.scryfall.com/cards/wot/25/rulings",
+        "scryfall_uri": "https://scryfall.com/card/wot/25/rhystic-study",
+    }
+
+    with patch.object(ScryfallProvider, "_request", return_value=sf_resp) as mock_sf:
+        meta = mcp_server.get_trade_card_metadata(
+            item_id=alice_wot.id,
+            include_live_scryfall=True,
+            include_cached_meeple=True,
+        )
+        assert mock_sf.call_count == 1
+
+    assert meta["found"] is True
+    assert meta["match_count"] == 1
+    assert meta["total_quantity_available"] == 1
+
+    primary = meta["listings"][0]
+    assert primary["card"]["set_code"] == "WOT"
+    assert primary["card"]["live_details"]["edhrec_rank"] == 3
+    assert primary["card"]["live_details"]["color_identity"] == ["U"]
+    assert "commander" in primary["card"]["live_details"]["legalities"]
+    assert primary["mighty_meeple"]["has_snapshot"] is True
+    assert primary["mighty_meeple"]["buylist_cash"] == 24.00
+    assert primary["mighty_meeple"]["buylist_credit"] == 31.00
+
+    # Cross-printing pod availability should include ONLY Bob's PCY copy
+    others = meta["other_printings_in_pod"]
+    assert len(others) == 1
+    assert others[0]["listing"]["item_id"] == bob_pcy.id
+    assert others[0]["card"]["set_code"] == "PCY"
+    assert others[0]["owner"]["handle_label"] == "@Bob"
+
+
+def test_mcp_traders_and_summary_and_resources(app, client):
+    import json
+    import anyio
+    import mcp_server
+
+    alice = _login_user(client, "alice_s@pod.local", "Alice", discord_handle="@alice")
+    bob = _login_user(client, "bob_s@pod.local", "Bob", discord_handle="@bob")
+
+    oracle_shared = str(uuid.uuid4())
+    card1 = _make_card("Cyclonic Rift", "CMM", "84", oracle_id=oracle_shared, usd_price=30.00)
+    card2 = _make_card("Cyclonic Rift", "RTR", "35", oracle_id=oracle_shared, usd_price=32.00)
+    card3 = _make_card("Lightning Bolt", "2X2", "117", usd_price=1.50)
+
+    db.session.add_all([
+        BinderItem(
+            user_id=alice.id,
+            scryfall_id=card1.scryfall_id,
+            quantity=1,
+            status="meeple_bound",
+            mm_buylist_cash=16.00,
+            mm_buylist_credit=21.00,
+            mm_checked_at=utc_now(),
+        ),
+        BinderItem(
+            user_id=bob.id,
+            scryfall_id=card2.scryfall_id,
+            quantity=2,
+            status="for_trade",
+        ),
+        BinderItem(
+            user_id=bob.id,
+            scryfall_id=card3.scryfall_id,
+            quantity=4,
+            status="for_trade",
+        ),
+    ])
+    db.session.commit()
+
+    traders = mcp_server.list_pod_traders()
+    assert traders["trader_count"] == 2
+    assert traders["traders"][0]["display_name"] == "Bob"
+    assert traders["traders"][0]["total_quantity"] == 6
+    assert traders["traders"][0]["total_market_value"] == 70.00
+    assert traders["traders"][1]["display_name"] == "Alice"
+    assert traders["traders"][1]["meeple_bound_quantity"] == 1
+    assert traders["traders"][1]["total_meeple_cash"] == 16.00
+
+    summary = mcp_server.get_pod_trade_summary()
+    assert summary["total_listings"] == 3
+    assert summary["total_cards_available"] == 7
+    assert summary["for_trade_cards"] == 6
+    assert summary["meeple_bound_cards"] == 1
+    assert summary["active_traders"] == 2
+    assert summary["total_market_value"] == 100.00
+    assert summary["top_value_listings"][0]["card"]["name"] == "Cyclonic Rift"
+    assert len(summary["multi_copy_oracles"]) == 2
+    assert summary["multi_copy_oracles"][0]["name"] == "Lightning Bolt"
+    assert summary["multi_copy_oracles"][1]["name"] == "Cyclonic Rift"
+    assert summary["multi_copy_oracles"][1]["traders"] == ["@Alice", "@Bob"]
+
+    # Verify MCP resources return valid JSON
+    feed_json = json.loads(mcp_server.trade_feed_resource())
+    assert feed_json["total_matching"] == 3
+    summary_json = json.loads(mcp_server.trade_summary_resource())
+    assert summary_json["total_cards_available"] == 7
+
+    # Verify MCP tool and resource registrations on the MCPServer instance
+    async def _check_mcp_registry():
+        tool_names = {t.name for t in await mcp_server.mcp.list_tools()}
+        resource_uris = {str(r.uri) for r in await mcp_server.mcp.list_resources()}
+        assert {
+            "list_trade_cards",
+            "get_trade_card_metadata",
+            "list_pod_traders",
+            "get_pod_trade_summary",
+        }.issubset(tool_names)
+        assert {
+            "vaultswap://trades/feed",
+            "vaultswap://trades/summary",
+        }.issubset(resource_uris)
+
+    anyio.run(_check_mcp_registry)
+
 
 

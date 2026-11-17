@@ -28,7 +28,7 @@ import drive_sync
 import services
 from config import Config
 from drive_sync import DriveClient, DriveImportWorker, DriveSyncError
-from models import BinderItem, Card, DriveImport, User, db, utc_now
+from models import ActivityLog, BinderItem, Card, DriveImport, User, db, utc_now
 from providers.scryfall import ScryfallProvider
 
 try:
@@ -107,8 +107,12 @@ def _query_user_binder(
     user_id: int,
     active_filter: str = "all",
     search_q: str = "",
+    color_filter: str = "all",
+    type_filter: str = "all",
+    finish_filter: str = "all",
+    sort_mode: str = "default",
 ) -> Tuple[List[BinderItem], Dict[str, Dict[str, int]]]:
-    """Queries user's private binder strictly scoped to `user_id`."""
+    """Queries user's private binder strictly scoped to `user_id` with Chimera-style filters and sorting."""
     oracle_dupe_map = _compute_oracle_dupe_map(user_id)
 
     query = (
@@ -127,11 +131,10 @@ def _query_user_binder(
             )
         )
 
+    # Active status filter
     if active_filter == "recent":
         cutoff = utc_now() - timedelta(days=7)
-        query = query.filter(BinderItem.created_at >= cutoff).order_by(
-            BinderItem.created_at.desc(), BinderItem.id.desc()
-        )
+        query = query.filter(BinderItem.created_at >= cutoff)
     elif active_filter == "dupes":
         dupe_oracles = [
             oid for oid, info in oracle_dupe_map.items() if info["total_qty"] > 1
@@ -139,21 +142,80 @@ def _query_user_binder(
         if dupe_oracles:
             query = query.filter(
                 or_(BinderItem.quantity > 1, Card.oracle_id.in_(dupe_oracles))
-            ).order_by(Card.name.asc(), Card.set_code.asc(), BinderItem.id.asc())
+            )
         else:
             query = query.filter(BinderItem.quantity > 1)
     elif active_filter == "for_trade":
-        query = query.filter(BinderItem.status == "for_trade").order_by(
-            BinderItem.updated_at.desc(), BinderItem.id.desc()
-        )
+        query = query.filter(BinderItem.status == "for_trade")
     elif active_filter == "meeple_bound":
-        query = query.filter(BinderItem.status == "meeple_bound").order_by(
-            BinderItem.updated_at.desc(), BinderItem.id.desc()
-        )
-    else:
-        query = query.order_by(BinderItem.created_at.desc(), BinderItem.id.desc())
+        query = query.filter(BinderItem.status == "meeple_bound")
 
-    return query.all(), oracle_dupe_map
+    # Finish filter
+    finish_norm = finish_filter.strip().lower()
+    if finish_norm in ("foil", "etched"):
+        query = query.filter(BinderItem.finish == finish_norm)
+    elif finish_norm in ("nonfoil", "normal"):
+        query = query.filter(BinderItem.finish == "nonfoil")
+    elif finish_norm == "special":
+        query = query.filter(BinderItem.finish.in_(["foil", "etched"]))
+
+    # Card Type filter (creature, instant, sorcery, artifact, enchantment, planeswalker, land, other)
+    t_clean = type_filter.strip().lower()
+    if t_clean and t_clean != "all":
+        if t_clean in ("creature", "instant", "sorcery", "artifact", "enchantment", "planeswalker", "land"):
+            query = query.filter(Card.type_line.ilike(f"%{t_clean}%"))
+        elif t_clean == "other":
+            query = query.filter(
+                ~Card.type_line.ilike("%creature%"),
+                ~Card.type_line.ilike("%instant%"),
+                ~Card.type_line.ilike("%sorcery%"),
+                ~Card.type_line.ilike("%artifact%"),
+                ~Card.type_line.ilike("%enchantment%"),
+                ~Card.type_line.ilike("%planeswalker%"),
+                ~Card.type_line.ilike("%land%"),
+            )
+
+    # Note: color_bucket can also be filtered server-side or in-memory, but let's query first or apply SQL:
+    c_clean = color_filter.strip().lower()
+
+    # Sorting
+    s_clean = sort_mode.strip().lower()
+    if s_clean == "price_desc":
+        query = query.order_by(func.coalesce(Card.usd_price, 0).desc(), Card.name.asc())
+    elif s_clean == "price_asc":
+        query = query.order_by(func.coalesce(Card.usd_price, 999999).asc(), Card.name.asc())
+    elif s_clean == "total_value_desc":
+        query = query.order_by((func.coalesce(Card.usd_price, 0) * BinderItem.quantity).desc(), Card.name.asc())
+    elif s_clean == "meeple_credit_desc":
+        query = query.order_by(func.coalesce(BinderItem.mm_buylist_credit, 0).desc(), Card.name.asc())
+    elif s_clean == "name_asc":
+        query = query.order_by(Card.name.asc(), Card.set_code.asc())
+    elif s_clean == "name_desc":
+        query = query.order_by(Card.name.desc(), Card.set_code.asc())
+    elif s_clean == "cmc_asc":
+        query = query.order_by(func.coalesce(Card.cmc, 0).asc(), Card.name.asc())
+    elif s_clean == "qty_desc":
+        query = query.order_by(BinderItem.quantity.desc(), Card.name.asc())
+    elif s_clean == "set_asc":
+        query = query.order_by(Card.set_code.asc(), Card.collector_number.asc())
+    else:
+        # Default sort
+        if active_filter == "recent":
+            query = query.order_by(BinderItem.created_at.desc(), BinderItem.id.desc())
+        elif active_filter == "dupes":
+            query = query.order_by(Card.name.asc(), Card.set_code.asc(), BinderItem.id.asc())
+        elif active_filter in ("for_trade", "meeple_bound"):
+            query = query.order_by(BinderItem.updated_at.desc(), BinderItem.id.desc())
+        else:
+            query = query.order_by(BinderItem.created_at.desc(), BinderItem.id.desc())
+
+    items = query.all()
+
+    # Python-level filter for color_bucket (ensures land, hybrid, multi, colorless match accurately)
+    if c_clean and c_clean != "all":
+        items = [item for item in items if item.color_bucket.lower() == c_clean]
+
+    return items, oracle_dupe_map
 
 
 def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
@@ -186,10 +248,56 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         )
 
     def _apply_lightweight_migrations() -> None:
-        cols = {c["name"] for c in inspect(db.engine).get_columns("users")}
-        if "is_admin" not in cols:
+        user_cols = {c["name"] for c in inspect(db.engine).get_columns("users")}
+        if "is_admin" not in user_cols:
             with db.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE"))
+        card_cols = {c["name"] for c in inspect(db.engine).get_columns("cards")}
+        if "colors" not in card_cols:
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE cards ADD COLUMN colors VARCHAR(50)"))
+        if "color_identity" not in card_cols:
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE cards ADD COLUMN color_identity VARCHAR(50)"))
+        if "cmc" not in card_cols:
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE cards ADD COLUMN cmc NUMERIC(6, 2)"))
+
+    def log_activity(
+        action: str,
+        user: Optional[User] = None,
+        user_id: Optional[int] = None,
+        user_email: Optional[str] = None,
+        user_name: Optional[str] = None,
+        details: Optional[str] = None,
+    ) -> ActivityLog:
+        """Helper to record user logins, card uploads, and admin actions."""
+        try:
+            u_id = user.id if user else user_id
+            u_email = (user.email if user else user_email) or ""
+            u_name = (user.display_name if user else user_name) or ""
+            ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+            if ip and "," in ip:
+                ip = ip.split(",")[0].strip()
+
+            entry = ActivityLog(
+                user_id=u_id,
+                user_email=u_email[:255] if u_email else None,
+                user_name=u_name[:100] if u_name else None,
+                action=action[:100],
+                details=details,
+                ip_address=(ip[:64] if ip else None),
+                created_at=utc_now(),
+            )
+            db.session.add(entry)
+            db.session.commit()
+            return entry
+        except Exception as exc:
+            logger.warning("Failed to record ActivityLog %s: %s", action, exc)
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
 
     with app.app_context():
         db.create_all()
@@ -307,6 +415,13 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.route("/logout", methods=["GET", "POST"])
     def logout():
+        u = get_current_user()
+        if u:
+            log_activity(
+                action="LOGOUT",
+                user=u,
+                details=f"Signed out ({u.email})",
+            )
         session.clear()
         return redirect(url_for("login_page"))
 
@@ -405,6 +520,11 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             )
             session.permanent = True
             session["user_id"] = user.id
+            log_activity(
+                action="LOGIN_GOOGLE",
+                user=user,
+                details=f"Signed in via Google OAuth ({user.email})",
+            )
             return redirect(next_url or url_for("binder_view"))
         except NotInvitedError as exc:
             flash(f"{exc} hasn't been invited to this pod yet. Ask an admin to add you.", "error")
@@ -442,6 +562,11 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         session.permanent = True
         session["user_id"] = user.id
+        log_activity(
+            action="LOGIN_DEV",
+            user=user,
+            details=f"Local dev sign-in ({user.email})",
+        )
         return redirect(url_for("binder_view"))
 
     # -------------------------------------------------------------------------
@@ -475,6 +600,11 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             )
             db.session.add(new_user)
             db.session.commit()
+            log_activity(
+                action="ADMIN_INVITE_USER",
+                user=get_current_user(),
+                details=f"Invited {raw_email} (Admin: {make_admin})",
+            )
             flash(f"Invited {raw_email} to VaultSwap.", "success")
             return redirect(url_for("admin_users"))
 
@@ -484,10 +614,38 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             .group_by(BinderItem.user_id)
             .all()
         )
+
+        # Activity log query with action/user filters
+        action_filter = (request.args.get("action") or "all").strip()
+        user_filter_raw = (request.args.get("user_id") or "").strip()
+        log_query = ActivityLog.query.order_by(ActivityLog.created_at.desc(), ActivityLog.id.desc())
+
+        if action_filter and action_filter != "all":
+            if action_filter == "logins":
+                log_query = log_query.filter(ActivityLog.action.in_(["LOGIN_GOOGLE", "LOGIN_DEV", "LOGOUT"]))
+            elif action_filter == "uploads":
+                log_query = log_query.filter(ActivityLog.action.in_(["UPLOAD_CSV", "UPLOAD_QUICK_LIST", "UPLOAD_DRIVE_SYNC", "ADD_SINGLE"]))
+            elif action_filter == "admin":
+                log_query = log_query.filter(ActivityLog.action.in_(["ADMIN_INVITE_USER", "ADMIN_REVOKE_INVITE"]))
+            else:
+                log_query = log_query.filter(ActivityLog.action == action_filter)
+
+        if user_filter_raw:
+            try:
+                u_id_val = int(user_filter_raw)
+                log_query = log_query.filter(ActivityLog.user_id == u_id_val)
+            except (ValueError, TypeError):
+                pass
+
+        activity_logs = log_query.limit(100).all()
+
         return render_template(
             "admin_users.html",
             users=users,
             card_counts=card_counts,
+            activity_logs=activity_logs,
+            action_filter=action_filter,
+            selected_user_id=user_filter_raw,
             active_tab="admin",
         )
 
@@ -509,6 +667,11 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         email = target.email
         db.session.delete(target)
         db.session.commit()
+        log_activity(
+            action="ADMIN_REVOKE_INVITE",
+            user=me,
+            details=f"Revoked pending invite for {email}",
+        )
         flash(f"Revoked pending invite for {email}.", "success")
         return redirect(url_for("admin_users"))
 
@@ -538,8 +701,22 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         if active_filter not in ("all", "recent", "dupes", "for_trade", "meeple_bound"):
             active_filter = "all"
         search_q = (request.args.get("q") or "").strip()
+        color_filter = (request.args.get("color") or "all").strip().lower()
+        type_filter = (request.args.get("type") or "all").strip().lower()
+        finish_filter = (request.args.get("finish") or "all").strip().lower()
+        sort_mode = (request.args.get("sort") or "default").strip().lower()
+        group_by = (request.args.get("group") or "none").strip().lower()
+        view_mode = (request.args.get("view") or "rows").strip().lower()
 
-        items, oracle_dupe_map = _query_user_binder(user.id, active_filter=active_filter, search_q=search_q)
+        items, oracle_dupe_map = _query_user_binder(
+            user.id,
+            active_filter=active_filter,
+            search_q=search_q,
+            color_filter=color_filter,
+            type_filter=type_filter,
+            finish_filter=finish_filter,
+            sort_mode=sort_mode,
+        )
         stats = _compute_binder_stats(user.id)
 
         context = {
@@ -548,6 +725,12 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             "stats": stats,
             "active_filter": active_filter,
             "search_q": search_q,
+            "color_filter": color_filter,
+            "type_filter": type_filter,
+            "finish_filter": finish_filter,
+            "sort_mode": sort_mode,
+            "group_by": group_by,
+            "view_mode": view_mode,
             "is_pending_fn": meeple_worker.is_pending,
             "active_tab": "binder",
         }
@@ -743,15 +926,35 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         active_filter = (request.form.get("filter") or "all").strip().lower()
         search_q = (request.form.get("q") or "").strip()
+        color_filter = (request.form.get("color") or "all").strip().lower()
+        type_filter = (request.form.get("type") or "all").strip().lower()
+        finish_filter = (request.form.get("finish") or "all").strip().lower()
+        sort_mode = (request.form.get("sort") or "default").strip().lower()
+        group_by = (request.form.get("group") or "none").strip().lower()
+        view_mode = (request.form.get("view") or "rows").strip().lower()
 
         if request.headers.get("HX-Request"):
-            updated_items, oracle_dupe_map = _query_user_binder(user.id, active_filter=active_filter, search_q=search_q)
+            updated_items, oracle_dupe_map = _query_user_binder(
+                user.id,
+                active_filter=active_filter,
+                search_q=search_q,
+                color_filter=color_filter,
+                type_filter=type_filter,
+                finish_filter=finish_filter,
+                sort_mode=sort_mode,
+            )
             return render_template(
                 "partials/binder_list.html",
                 items=updated_items,
                 oracle_dupe_map=oracle_dupe_map,
                 active_filter=active_filter,
                 search_q=search_q,
+                color_filter=color_filter,
+                type_filter=type_filter,
+                finish_filter=finish_filter,
+                sort_mode=sort_mode,
+                group_by=group_by,
+                view_mode=view_mode,
                 is_pending_fn=meeple_worker.is_pending,
             )
 
@@ -781,6 +984,12 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 owner_id = None
 
         search_q = (request.args.get("q") or "").strip()
+        color_filter = (request.args.get("color") or "all").strip().lower()
+        type_filter = (request.args.get("type") or "all").strip().lower()
+        finish_filter = (request.args.get("finish") or "all").strip().lower()
+        sort_mode = (request.args.get("sort") or "default").strip().lower()
+        group_by = (request.args.get("group") or "none").strip().lower()
+        view_mode = (request.args.get("view") or "rows").strip().lower()
 
         query = (
             BinderItem.query.join(User, BinderItem.user_id == User.id)
@@ -799,13 +1008,67 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 or_(
                     Card.name.ilike(like_term),
                     Card.set_code.ilike(like_term),
+                    Card.type_line.ilike(like_term),
                     User.display_name.ilike(like_term),
                 )
             )
 
-        # Put Meeple Bound cards first because they are about to leave the playgroup
-        priority_order = case((BinderItem.status == "meeple_bound", 0), else_=1)
-        items = query.order_by(priority_order, BinderItem.updated_at.desc(), BinderItem.id.desc()).all()
+        # Finish filter
+        finish_norm = finish_filter.strip().lower()
+        if finish_norm in ("foil", "etched"):
+            query = query.filter(BinderItem.finish == finish_norm)
+        elif finish_norm in ("nonfoil", "normal"):
+            query = query.filter(BinderItem.finish == "nonfoil")
+        elif finish_norm == "special":
+            query = query.filter(BinderItem.finish.in_(["foil", "etched"]))
+
+        # Card Type filter
+        t_clean = type_filter.strip().lower()
+        if t_clean and t_clean != "all":
+            if t_clean in ("creature", "instant", "sorcery", "artifact", "enchantment", "planeswalker", "land"):
+                query = query.filter(Card.type_line.ilike(f"%{t_clean}%"))
+            elif t_clean == "other":
+                query = query.filter(
+                    ~Card.type_line.ilike("%creature%"),
+                    ~Card.type_line.ilike("%instant%"),
+                    ~Card.type_line.ilike("%sorcery%"),
+                    ~Card.type_line.ilike("%artifact%"),
+                    ~Card.type_line.ilike("%enchantment%"),
+                    ~Card.type_line.ilike("%planeswalker%"),
+                    ~Card.type_line.ilike("%land%"),
+                )
+
+        # Sorting
+        s_clean = sort_mode.strip().lower()
+        if s_clean == "price_desc":
+            query = query.order_by(func.coalesce(Card.usd_price, 0).desc(), Card.name.asc())
+        elif s_clean == "price_asc":
+            query = query.order_by(func.coalesce(Card.usd_price, 999999).asc(), Card.name.asc())
+        elif s_clean == "total_value_desc":
+            query = query.order_by((func.coalesce(Card.usd_price, 0) * BinderItem.quantity).desc(), Card.name.asc())
+        elif s_clean == "meeple_credit_desc":
+            query = query.order_by(func.coalesce(BinderItem.mm_buylist_credit, 0).desc(), Card.name.asc())
+        elif s_clean == "name_asc":
+            query = query.order_by(Card.name.asc(), Card.set_code.asc())
+        elif s_clean == "name_desc":
+            query = query.order_by(Card.name.desc(), Card.set_code.asc())
+        elif s_clean == "cmc_asc":
+            query = query.order_by(func.coalesce(Card.cmc, 0).asc(), Card.name.asc())
+        elif s_clean == "qty_desc":
+            query = query.order_by(BinderItem.quantity.desc(), Card.name.asc())
+        elif s_clean == "set_asc":
+            query = query.order_by(Card.set_code.asc(), Card.collector_number.asc())
+        else:
+            # Default: Put Meeple Bound cards first because they are about to leave the playgroup
+            priority_order = case((BinderItem.status == "meeple_bound", 0), else_=1)
+            query = query.order_by(priority_order, BinderItem.updated_at.desc(), BinderItem.id.desc())
+
+        items = query.all()
+
+        # Color filter (python-level)
+        c_clean = color_filter.strip().lower()
+        if c_clean and c_clean != "all":
+            items = [item for item in items if item.color_bucket.lower() == c_clean]
 
         pod_owners = (
             db.session.query(User)
@@ -822,6 +1085,12 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             "status_filter": status_filter,
             "selected_owner_id": owner_id,
             "search_q": search_q,
+            "color_filter": color_filter,
+            "type_filter": type_filter,
+            "finish_filter": finish_filter,
+            "sort_mode": sort_mode,
+            "group_by": group_by,
+            "view_mode": view_mode,
             "active_tab": "pod",
         }
         if request.headers.get("HX-Request"):
@@ -900,6 +1169,23 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 entry["condition"] = single_cond
 
         result = services.import_cards_to_binder(user.id, parsed["entries"])
+
+        # Determine upload source
+        if uploaded_file and uploaded_file.filename:
+            upload_source = f"CSV Upload ({uploaded_file.filename})"
+            action_name = "UPLOAD_CSV"
+        elif single_card:
+            upload_source = f"Single Add ({single_card})"
+            action_name = "ADD_SINGLE"
+        else:
+            upload_source = "Quick Text Paste"
+            action_name = "UPLOAD_QUICK_LIST"
+
+        log_activity(
+            action=action_name,
+            user=user,
+            details=f"{upload_source}: Added {result['total_quantity']} card(s) across {result['imported_rows']} row(s).",
+        )
 
         msg = f"Added {result['total_quantity']} card(s) across {result['imported_rows']} line(s) to your Private Binder."
         if result["unresolved"]:

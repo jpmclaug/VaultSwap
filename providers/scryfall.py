@@ -96,6 +96,18 @@ class ScryfallProvider:
         usd_price = _to_decimal(prices.get("usd"))
         usd_foil_price = _to_decimal(prices.get("usd_foil") or prices.get("usd_etched"))
 
+        # Colors and CMC
+        colors_list = card.get("colors")
+        if colors_list is None and card.get("card_faces") and card["card_faces"][0].get("colors"):
+            colors_list = card["card_faces"][0].get("colors")
+        colors_str = ",".join(str(c).upper().strip() for c in colors_list if str(c).strip()) if isinstance(colors_list, (list, tuple)) else (str(colors_list) if colors_list else None)
+
+        color_id_list = card.get("color_identity")
+        color_id_str = ",".join(str(c).upper().strip() for c in color_id_list if str(c).strip()) if isinstance(color_id_list, (list, tuple)) else (str(color_id_list) if color_id_list else None)
+
+        raw_cmc = card.get("cmc")
+        cmc_dec = _to_decimal(raw_cmc)
+
         return {
             "scryfall_id": str(card.get("id") or "").lower(),
             "oracle_id": str(oracle_id or "").lower(),
@@ -107,6 +119,9 @@ class ScryfallProvider:
             "image_uri_small": image_small,
             "mana_cost": mana_cost[:100] if mana_cost else None,
             "type_line": type_line[:255] if type_line else None,
+            "colors": colors_str[:50] if colors_str else None,
+            "color_identity": color_id_str[:50] if color_id_str else None,
+            "cmc": cmc_dec,
             "usd_price": usd_price,
             "usd_foil_price": usd_foil_price,
         }

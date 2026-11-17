@@ -483,6 +483,23 @@ def run_drive_import(
         imp.phase = None
         imp.finished_at = utc_now()
         db.session.commit()
+
+        # Log activity
+        try:
+            from models import ActivityLog, User
+            user_obj = db.session.get(User, imp.user_id)
+            log_entry = ActivityLog(
+                user_id=imp.user_id,
+                user_email=user_obj.email if user_obj else None,
+                user_name=user_obj.display_name if user_obj else None,
+                action="UPLOAD_DRIVE_SYNC",
+                details=f"Google Drive Sync ({imp.file_name}): Imported {imp.cards_imported or 0} card(s) across {imp.rows_imported or 0} row(s).",
+                created_at=utc_now(),
+            )
+            db.session.add(log_entry)
+            db.session.commit()
+        except Exception as log_err:
+            logger.debug("Failed to log drive import activity: %s", log_err)
     except Exception as exc:
         logger.error("DriveImport %s failed: %s", import_id, exc, exc_info=True)
         try:

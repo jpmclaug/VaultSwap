@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS cards (
     image_uri_small TEXT,
     mana_cost VARCHAR(100),
     type_line VARCHAR(255),
+    colors VARCHAR(50),
+    color_identity VARCHAR(50),
+    cmc NUMERIC(6, 2),
     usd_price NUMERIC(10, 2),
     usd_foil_price NUMERIC(10, 2),
     scryfall_updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -85,3 +88,19 @@ CREATE TABLE IF NOT EXISTS drive_imports (
 
 CREATE INDEX IF NOT EXISTS idx_drive_imports_user_id ON drive_imports(user_id);
 CREATE INDEX IF NOT EXISTS idx_drive_imports_user_watermark ON drive_imports(user_id, max_card_created_at DESC);
+
+-- 5. User Activity Logs
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    user_email VARCHAR(255),
+    user_name VARCHAR(100),
+    action VARCHAR(100) NOT NULL,
+    details TEXT,
+    ip_address VARCHAR(64),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON activity_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id ON activity_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_action ON activity_logs(action);

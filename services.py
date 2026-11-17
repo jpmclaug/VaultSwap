@@ -560,6 +560,9 @@ def _upsert_card_from_scryfall(card_data: Dict[str, Any]) -> Card:
             image_uri_small=card_data.get("image_uri_small"),
             mana_cost=card_data.get("mana_cost"),
             type_line=card_data.get("type_line"),
+            colors=card_data.get("colors"),
+            color_identity=card_data.get("color_identity"),
+            cmc=card_data.get("cmc"),
             usd_price=card_data.get("usd_price"),
             usd_foil_price=card_data.get("usd_foil_price"),
             scryfall_updated_at=now,
@@ -580,6 +583,12 @@ def _upsert_card_from_scryfall(card_data: Dict[str, Any]) -> Card:
             card.mana_cost = card_data["mana_cost"]
         if card_data.get("type_line") is not None:
             card.type_line = card_data["type_line"]
+        if card_data.get("colors") is not None:
+            card.colors = card_data["colors"]
+        if card_data.get("color_identity") is not None:
+            card.color_identity = card_data["color_identity"]
+        if card_data.get("cmc") is not None:
+            card.cmc = card_data["cmc"]
         if card_data.get("usd_price") is not None:
             card.usd_price = card_data["usd_price"]
         if card_data.get("usd_foil_price") is not None:

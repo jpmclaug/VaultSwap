@@ -1,105 +1,293 @@
-<div id="pod-feed-list" class="space-y-2.5">
+<div id="pod-feed-list" class="space-y-3">
     {% if items %}
-        {% for item in items %}
-        {% set card = item.card %}
-        {% set owner = item.user %}
-        {% set market_price = item.market_price %}
-        <div class="bg-slate-900/95 border rounded-2xl p-3 shadow-sm
-            {% if item.status == 'meeple_bound' %}border-amber-500/40{% else %}border-emerald-500/35{% endif %}">
+        <!-- VIEW 1: Detail Rows -->
+        <div id="pod-rows-container" class="space-y-2.5">
+            {% for item in items %}
+            {% set card = item.card %}
+            {% set owner = item.user %}
+            {% set market_price = item.market_price %}
+            <div id="pod-row-{{ item.id }}"
+                 class="vault-card-item bg-slate-900/95 border rounded-2xl p-3 shadow-sm transition
+                 {% if item.status == 'meeple_bound' %}border-amber-500/40{% else %}border-emerald-500/35{% endif %}"
+                 data-id="{{ item.id }}"
+                 data-name="{{ card.name|lower }}"
+                 data-set="{{ (card.set_code or '')|lower }}"
+                 data-owner="{{ (owner.display_name or '')|lower }}"
+                 data-color-bucket="{{ (item.color_bucket or 'colorless')|lower }}"
+                 data-primary-type="{{ (item.primary_card_type or 'other')|lower }}"
+                 data-finish="{{ (item.finish or 'nonfoil')|lower }}"
+                 data-status="{{ (item.status or 'for_trade')|lower }}"
+                 data-price="{{ market_price if market_price is not none else 999999 }}"
+                 data-total-value="{{ item.line_market_value }}"
+                 data-meeple-credit="{{ item.mm_buylist_credit if item.mm_buylist_credit is not none else 0 }}"
+                 data-cmc="{{ item.computed_cmc }}"
+                 data-qty="{{ item.quantity or 1 }}"
+                 data-order="{{ loop.index0 }}">
 
-            <!-- Owner & Status Header -->
-            <div class="flex items-center justify-between gap-2 pb-2 mb-2.5 border-b border-slate-800/80">
-                <div class="flex items-center gap-2 min-w-0">
-                    {% if owner.avatar_url %}
-                    <img src="{{ owner.avatar_url }}" alt="{{ owner.display_name }}" class="w-6 h-6 rounded-full object-cover shrink-0">
-                    {% else %}
-                    <span class="w-6 h-6 rounded-full bg-slate-800 border border-slate-700 text-slate-200 text-[11px] font-bold flex items-center justify-center shrink-0">
-                        {{ (owner.display_name or 'U')[0]|upper }}
+                <!-- Owner & Status Header -->
+                <div class="flex items-center justify-between gap-2 pb-2 mb-2.5 border-b border-slate-800/80">
+                    <div class="flex items-center gap-2 min-w-0">
+                        {% if owner.avatar_url %}
+                        <img src="{{ owner.avatar_url }}" alt="{{ owner.display_name }}" class="w-6 h-6 rounded-full object-cover shrink-0">
+                        {% else %}
+                        <span class="w-6 h-6 rounded-full bg-slate-800 border border-slate-700 text-slate-200 text-[11px] font-bold flex items-center justify-center shrink-0">
+                            {{ (owner.display_name or 'U')[0]|upper }}
+                        </span>
+                        {% endif %}
+                        <span class="text-xs font-bold text-white truncate">{{ owner.handle_label }}</span>
+                        {% if owner.discord_handle %}
+                        <span class="text-[10px] text-indigo-300 bg-indigo-500/15 border border-indigo-500/25 px-1.5 py-0.5 rounded-full truncate">
+                            {{ owner.discord_handle }}
+                        </span>
+                        {% endif %}
+                    </div>
+
+                    {% if item.status == 'meeple_bound' %}
+                    <span class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-400/15 border border-amber-400/40 text-amber-300 text-[10px] font-extrabold uppercase tracking-wider">
+                        <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                        Meeple Bound
                     </span>
-                    {% endif %}
-                    <span class="text-xs font-bold text-white truncate">{{ owner.handle_label }}</span>
-                    {% if owner.discord_handle %}
-                    <span class="text-[10px] text-indigo-300 bg-indigo-500/15 border border-indigo-500/25 px-1.5 py-0.5 rounded-full truncate">
-                        {{ owner.discord_handle }}
+                    {% else %}
+                    <span class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[10px] font-extrabold uppercase tracking-wider">
+                        For Trade
                     </span>
                     {% endif %}
                 </div>
 
-                {% if item.status == 'meeple_bound' %}
-                <span class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-400/15 border border-amber-400/40 text-amber-300 text-[10px] font-extrabold uppercase tracking-wider">
-                    <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                    Meeple Bound
-                </span>
-                {% else %}
-                <span class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[10px] font-extrabold uppercase tracking-wider">
-                    For Trade
-                </span>
-                {% endif %}
-            </div>
+                <!-- Card Body -->
+                <div class="flex gap-3 items-start">
+                    <button type="button"
+                            onclick="openCardPreview('{{ card.image_uri_normal or card.image_uri_small or '' }}', '{{ card.name|e }} ({{ card.set_code }})')"
+                            class="w-12 h-16 rounded-lg overflow-hidden bg-slate-800 border border-slate-700/80 shrink-0 focus:outline-none">
+                        {% if card.image_uri_small or card.image_uri_normal %}
+                        <img src="{{ card.image_uri_small or card.image_uri_normal }}" alt="{{ card.name }}"
+                             loading="lazy" class="w-full h-full object-cover">
+                        {% else %}
+                        <div class="w-full h-full flex items-center justify-center text-[10px] font-bold text-slate-500">MTG</div>
+                        {% endif %}
+                    </button>
 
-            <!-- Card Body -->
-            <div class="flex gap-3 items-start">
-                <button type="button"
-                        onclick="openCardPreview('{{ card.image_uri_normal or card.image_uri_small or '' }}', '{{ card.name|e }} ({{ card.set_code }})')"
-                        class="w-12 h-16 rounded-lg overflow-hidden bg-slate-800 border border-slate-700/80 shrink-0 focus:outline-none">
-                    {% if card.image_uri_small or card.image_uri_normal %}
-                    <img src="{{ card.image_uri_small or card.image_uri_normal }}" alt="{{ card.name }}"
-                         loading="lazy" class="w-full h-full object-cover">
-                    {% else %}
-                    <div class="w-full h-full flex items-center justify-center text-[10px] font-bold text-slate-500">MTG</div>
-                    {% endif %}
-                </button>
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-start justify-between gap-2">
+                            <div class="min-w-0">
+                                <h3 class="text-sm font-bold text-white truncate">{{ card.name }}</h3>
+                                <div class="flex flex-wrap items-center gap-1.5 mt-1">
+                                    <span class="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-bold uppercase text-slate-300">
+                                        {{ card.set_code }} #{{ card.collector_number }}
+                                    </span>
+                                    {% if item.finish != 'nonfoil' %}
+                                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase
+                                        {% if item.finish == 'etched' %}bg-purple-500/20 text-purple-300
+                                        {% else %}bg-sky-500/20 text-sky-300{% endif %}">
+                                        {{ item.finish }}
+                                    </span>
+                                    {% endif %}
+                                    <span class="px-1.5 py-0.5 rounded bg-slate-800/70 text-[10px] font-semibold text-slate-400">
+                                        {{ item.condition or 'NM' }}
+                                    </span>
+                                    <span class="px-1.5 py-0.5 rounded bg-slate-800/70 text-[10px] font-bold text-white">
+                                        {{ item.quantity }}x avail
+                                    </span>
+                                </div>
+                            </div>
 
-                <div class="flex-1 min-w-0">
-                    <div class="flex items-start justify-between gap-2">
-                        <div class="min-w-0">
-                            <h3 class="text-sm font-bold text-white truncate">{{ card.name }}</h3>
-                            <div class="flex flex-wrap items-center gap-1.5 mt-1">
-                                <span class="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-bold uppercase text-slate-300">
-                                    {{ card.set_code }} #{{ card.collector_number }}
-                                </span>
-                                {% if item.finish != 'nonfoil' %}
-                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase
-                                    {% if item.finish == 'etched' %}bg-purple-500/20 text-purple-300
-                                    {% else %}bg-sky-500/20 text-sky-300{% endif %}">
-                                    {{ item.finish }}
-                                </span>
-                                {% endif %}
-                                <span class="px-1.5 py-0.5 rounded bg-slate-800/70 text-[10px] font-semibold text-slate-400">
-                                    {{ item.condition or 'NM' }}
-                                </span>
-                                <span class="px-1.5 py-0.5 rounded bg-slate-800/70 text-[10px] font-bold text-white">
-                                    {{ item.quantity }}x avail
-                                </span>
+                            <div class="text-right shrink-0">
+                                <div class="text-sm font-extrabold text-white">
+                                    {% if market_price is not none %}${{ '%.2f'|format(market_price) }}{% else %}--{% endif %}
+                                </div>
+                                <div class="text-[10px] text-slate-400">Scryfall</div>
                             </div>
                         </div>
 
-                        <div class="text-right shrink-0">
-                            <div class="text-sm font-extrabold text-white">
-                                {% if market_price is not none %}${{ '%.2f'|format(market_price) }}{% else %}--{% endif %}
-                            </div>
-                            <div class="text-[10px] text-slate-400">Scryfall</div>
+                        {% if item.has_meeple_snapshot %}
+                        <div class="mt-2 pt-2 border-t border-slate-800/70 text-[11px] text-slate-300 truncate">
+                            <span class="font-semibold {% if item.mm_in_stock %}text-emerald-400{% else %}text-slate-400{% endif %}">
+                                Meeple: {{ 'In Stock' if item.mm_in_stock else 'Out of Stock' }}{% if item.mm_retail_price is not none %} (${{ '%.2f'|format(item.mm_retail_price) }}){% endif %}
+                            </span>
+                            <span class="text-slate-600 mx-1">&bull;</span>
+                            <span class="text-amber-300 font-semibold">
+                                Buylist:
+                                {% if item.mm_buylist_cash is not none %}${{ '%.2f'|format(item.mm_buylist_cash) }} Cash{% else %}N/A{% endif %}
+                                /
+                                {% if item.mm_buylist_credit is not none %}${{ '%.2f'|format(item.mm_buylist_credit) }} Credit{% else %}N/A{% endif %}
+                            </span>
                         </div>
+                        {% endif %}
                     </div>
-
-                    {% if item.has_meeple_snapshot %}
-                    <div class="mt-2 pt-2 border-t border-slate-800/70 text-[11px] text-slate-300 truncate">
-                        <span class="font-semibold {% if item.mm_in_stock %}text-emerald-400{% else %}text-slate-400{% endif %}">
-                            Meeple: {{ 'In Stock' if item.mm_in_stock else 'Out of Stock' }}{% if item.mm_retail_price is not none %} (${{ '%.2f'|format(item.mm_retail_price) }}){% endif %}
-                        </span>
-                        <span class="text-slate-600 mx-1">&bull;</span>
-                        <span class="text-amber-300 font-semibold">
-                            Buylist:
-                            {% if item.mm_buylist_cash is not none %}${{ '%.2f'|format(item.mm_buylist_cash) }} Cash{% else %}N/A{% endif %}
-                            /
-                            {% if item.mm_buylist_credit is not none %}${{ '%.2f'|format(item.mm_buylist_credit) }} Credit{% else %}N/A{% endif %}
-                        </span>
-                    </div>
-                    {% endif %}
                 </div>
             </div>
+            {% endfor %}
         </div>
-        {% endfor %}
+
+        <!-- VIEW 2: Visual Art Grid -->
+        <div id="pod-art-grid" class="hidden grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5">
+            {% for item in items %}
+            {% set card = item.card %}
+            {% set owner = item.user %}
+            <div id="pod-art-{{ item.id }}"
+                 class="vault-card-item bg-slate-900 border rounded-2xl p-2 flex flex-col justify-between transition shadow-sm relative
+                 {% if item.status == 'meeple_bound' %}border-amber-500/50{% else %}border-emerald-500/50{% endif %}"
+                 data-id="{{ item.id }}"
+                 data-name="{{ card.name|lower }}"
+                 data-set="{{ (card.set_code or '')|lower }}"
+                 data-owner="{{ (owner.display_name or '')|lower }}"
+                 data-color-bucket="{{ (item.color_bucket or 'colorless')|lower }}"
+                 data-primary-type="{{ (item.primary_card_type or 'other')|lower }}"
+                 data-finish="{{ (item.finish or 'nonfoil')|lower }}"
+                 data-status="{{ (item.status or 'for_trade')|lower }}"
+                 data-price="{{ item.market_price if item.market_price is not none else 999999 }}"
+                 data-total-value="{{ item.line_market_value }}"
+                 data-meeple-credit="{{ item.mm_buylist_credit if item.mm_buylist_credit is not none else 0 }}"
+                 data-cmc="{{ item.computed_cmc }}"
+                 data-qty="{{ item.quantity or 1 }}"
+                 data-order="{{ loop.index0 }}">
+
+                <!-- Thumbnail & Floating Badges -->
+                <div class="relative group cursor-pointer w-full aspect-[5/7] bg-slate-950 rounded-xl border border-slate-800 overflow-hidden flex items-center justify-center shrink-0"
+                     onclick="openCardPreview('{{ card.image_uri_normal or card.image_uri_small or '' }}', '{{ card.name|e }} ({{ card.set_code }})')">
+                    {% if card.image_uri_small or card.image_uri_normal %}
+                    <img src="{{ card.image_uri_small or card.image_uri_normal }}" alt="{{ card.name }}" loading="lazy" class="w-full h-full object-cover">
+                    {% else %}
+                    <div class="text-[10px] text-slate-500 font-bold uppercase text-center p-2">MTG ART</div>
+                    {% endif %}
+
+                    <!-- Floating Top-Left: Owner Badge -->
+                    <div class="absolute top-1 left-1 bg-slate-950/90 border border-slate-700/80 rounded px-1 text-[9px] font-bold text-white pointer-events-none truncate max-w-[80px]">
+                        {{ owner.handle_label }}
+                    </div>
+
+                    <!-- Floating Top-Right: Finish & Set -->
+                    <div class="absolute top-1 right-1 flex flex-col items-end gap-0.5 pointer-events-none">
+                        {% if item.finish != 'nonfoil' %}
+                        <span class="rounded px-1 text-[8px] font-extrabold uppercase
+                            {% if item.finish == 'etched' %}bg-purple-500 text-slate-950{% else %}bg-amber-400 text-slate-950{% endif %}">
+                            ★ {{ item.finish }}
+                        </span>
+                        {% endif %}
+                        <span class="bg-slate-950/90 text-slate-300 border border-slate-700/80 rounded text-[8px] px-1 font-bold uppercase">
+                            {{ card.set_code }}
+                        </span>
+                    </div>
+
+                    <!-- Floating Bottom: Status Badge -->
+                    <div class="absolute bottom-1 inset-x-1 text-center pointer-events-none">
+                        {% if item.status == 'meeple_bound' %}
+                        <span class="block bg-amber-400 text-slate-950 text-[9px] font-extrabold uppercase rounded py-0.5 shadow">
+                            ⚡ Meeple Bound
+                        </span>
+                        {% else %}
+                        <span class="block bg-emerald-500 text-slate-950 text-[9px] font-extrabold uppercase rounded py-0.5 shadow">
+                            🤝 For Trade
+                        </span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Card Details -->
+                <div class="mt-1.5 flex-1 flex flex-col justify-between space-y-1">
+                    <div>
+                        <h4 class="font-bold text-xs text-white truncate" title="{{ card.name }}">{{ card.name }}</h4>
+                        <div class="flex items-center justify-between text-[10px] text-slate-400 mt-0.5">
+                            <span class="truncate">{{ item.short_type_line }}</span>
+                            <span class="font-extrabold text-white shrink-0">
+                                {% if item.market_price is not none %}${{ '%.2f'|format(item.market_price) }}{% else %}--{% endif %}
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-[10px] text-slate-400">
+                        <span>{{ item.quantity }}x avail</span>
+                        <span class="font-bold text-slate-300">{{ owner.handle_label }}</span>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- VIEW 3: Compact Checklist -->
+        <div id="pod-checklist" class="hidden divide-y divide-slate-800/80 border border-slate-800 rounded-2xl bg-slate-900 overflow-hidden shadow-sm">
+            {% for item in items %}
+            {% set card = item.card %}
+            {% set owner = item.user %}
+            <div id="pod-check-{{ item.id }}"
+                 class="vault-card-item p-2.5 flex items-center justify-between gap-2 hover:bg-slate-800/60 transition"
+                 data-id="{{ item.id }}"
+                 data-name="{{ card.name|lower }}"
+                 data-set="{{ (card.set_code or '')|lower }}"
+                 data-owner="{{ (owner.display_name or '')|lower }}"
+                 data-color-bucket="{{ (item.color_bucket or 'colorless')|lower }}"
+                 data-primary-type="{{ (item.primary_card_type or 'other')|lower }}"
+                 data-finish="{{ (item.finish or 'nonfoil')|lower }}"
+                 data-status="{{ (item.status or 'for_trade')|lower }}"
+                 data-price="{{ item.market_price if item.market_price is not none else 999999 }}"
+                 data-total-value="{{ item.line_market_value }}"
+                 data-meeple-credit="{{ item.mm_buylist_credit if item.mm_buylist_credit is not none else 0 }}"
+                 data-cmc="{{ item.computed_cmc }}"
+                 data-qty="{{ item.quantity or 1 }}"
+                 data-order="{{ loop.index0 }}">
+
+                <!-- Left: Color Pip + Tiny Thumbnail + Card Info -->
+                <div class="flex items-center space-x-2.5 min-w-0 flex-1">
+                    <!-- Color pip indicator -->
+                    <span class="w-5 h-5 rounded-md flex items-center justify-center border text-[9px] font-extrabold shrink-0
+                        {% if item.color_bucket == 'W' %}bg-amber-100/10 text-amber-100 border-amber-200/40
+                        {% elif item.color_bucket == 'U' %}bg-sky-500/15 text-sky-400 border-sky-400/40
+                        {% elif item.color_bucket == 'B' %}bg-purple-500/15 text-purple-300 border-purple-400/40
+                        {% elif item.color_bucket == 'R' %}bg-rose-500/15 text-rose-400 border-rose-400/40
+                        {% elif item.color_bucket == 'G' %}bg-emerald-500/15 text-emerald-400 border-emerald-400/40
+                        {% elif item.color_bucket == 'Multicolor' %}bg-amber-500/20 text-amber-300 border-amber-400/40
+                        {% elif item.color_bucket == 'Land' %}bg-slate-700/30 text-slate-200 border-slate-500/40
+                        {% else %}bg-slate-800 text-slate-400 border-slate-700{% endif %}">
+                        {% if item.color_bucket == 'W' %}W
+                        {% elif item.color_bucket == 'U' %}U
+                        {% elif item.color_bucket == 'B' %}B
+                        {% elif item.color_bucket == 'R' %}R
+                        {% elif item.color_bucket == 'G' %}G
+                        {% elif item.color_bucket == 'Multicolor' %}M
+                        {% elif item.color_bucket == 'Land' %}L
+                        {% else %}C{% endif %}
+                    </span>
+
+                    <!-- Tiny Thumbnail -->
+                    <div class="w-7 h-10 bg-slate-950 rounded border border-slate-800 overflow-hidden shrink-0 cursor-pointer"
+                         onclick="openCardPreview('{{ card.image_uri_normal or card.image_uri_small or '' }}', '{{ card.name|e }} ({{ card.set_code }})')">
+                        {% if card.image_uri_small or card.image_uri_normal %}
+                        <img src="{{ card.image_uri_small or card.image_uri_normal }}" alt="{{ card.name }}" class="w-full h-full object-cover">
+                        {% else %}
+                        <div class="w-full h-full flex items-center justify-center text-[7px] font-bold text-slate-600">MTG</div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Title & Metadata -->
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center space-x-1.5">
+                            <h4 class="text-xs font-bold text-white truncate">{{ card.name }}</h4>
+                            <span class="text-[10px] font-semibold text-slate-400 shrink-0">({{ item.quantity }}x)</span>
+                        </div>
+                        <div class="flex items-center space-x-1.5 text-[10px] text-slate-400">
+                            <span class="uppercase font-bold text-slate-300">{{ card.set_code }}</span>
+                            <span>&bull;</span>
+                            <span class="truncate">{{ item.short_type_line }}</span>
+                            <span>&bull;</span>
+                            <span class="text-slate-300 font-semibold">{{ owner.handle_label }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right: Price & Status Badge -->
+                <div class="text-right shrink-0">
+                    <div class="text-xs font-extrabold text-white">
+                        {% if item.market_price is not none %}${{ '%.2f'|format(item.market_price) }}{% else %}--{% endif %}
+                    </div>
+                    {% if item.status == 'meeple_bound' %}
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 font-bold uppercase">Meeple</span>
+                    {% else %}
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold uppercase">Trade</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
     {% else %}
         <div class="bg-slate-900/60 border border-dashed border-slate-800 rounded-2xl p-8 text-center space-y-2">
             <div class="text-sm font-bold text-slate-200">No pod trade cards found</div>

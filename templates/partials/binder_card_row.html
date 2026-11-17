@@ -6,10 +6,23 @@
 {% set is_row_pending = is_pending if is_pending is defined else false %}
 
 <div id="binder-row-{{ item.id }}"
-     class="bg-slate-900/95 border rounded-2xl p-3 transition shadow-sm
+     class="vault-card-item bg-slate-900/95 border rounded-2xl p-3 transition shadow-sm
      {% if item.status == 'meeple_bound' %}border-amber-500/40
      {% elif item.status == 'for_trade' %}border-emerald-500/40
      {% else %}border-slate-800{% endif %}"
+     data-id="{{ item.id }}"
+     data-name="{{ card.name|lower }}"
+     data-set="{{ (card.set_code or '')|lower }}"
+     data-color-bucket="{{ (item.color_bucket or 'colorless')|lower }}"
+     data-primary-type="{{ (item.primary_card_type or 'other')|lower }}"
+     data-finish="{{ (item.finish or 'nonfoil')|lower }}"
+     data-status="{{ (item.status or 'private')|lower }}"
+     data-price="{{ item.market_price if item.market_price is not none else 999999 }}"
+     data-total-value="{{ item.line_market_value }}"
+     data-meeple-credit="{{ item.mm_buylist_credit if item.mm_buylist_credit is not none else 0 }}"
+     data-cmc="{{ item.computed_cmc }}"
+     data-qty="{{ item.quantity or 1 }}"
+     data-order="{{ loop.index0 if loop is defined else 0 }}"
      {% if is_row_pending %}
      hx-get="{{ url_for('get_item_row', item_id=item.id) }}"
      hx-trigger="every 2s"

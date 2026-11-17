@@ -62,6 +62,12 @@ class User(db.Model):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    activity_logs = db.relationship(
+        "ActivityLog",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     @property
     def is_pending(self) -> bool:
@@ -93,6 +99,9 @@ class Card(db.Model):
     image_uri_small = db.Column(Text, nullable=True)
     mana_cost = db.Column(String(100), nullable=True)
     type_line = db.Column(String(255), nullable=True)
+    colors = db.Column(String(50), nullable=True)
+    color_identity = db.Column(String(50), nullable=True)
+    cmc = db.Column(Numeric(6, 2), nullable=True)
     usd_price = db.Column(Numeric(10, 2), nullable=True)
     usd_foil_price = db.Column(Numeric(10, 2), nullable=True)
     scryfall_updated_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -105,6 +114,101 @@ class Card(db.Model):
         if fin in ("foil", "etched"):
             return self.usd_foil_price if self.usd_foil_price is not None else self.usd_price
         return self.usd_price if self.usd_price is not None else self.usd_foil_price
+
+    @property
+    def primary_card_type(self) -> str:
+        """Categorizes card into canonical store/binder section based on type_line."""
+        tl = (self.type_line or "").lower()
+        if "creature" in tl:
+            return "Creature"
+        if "instant" in tl:
+            return "Instant"
+        if "sorcery" in tl:
+            return "Sorcery"
+        if "artifact" in tl:
+            return "Artifact"
+        if "enchantment" in tl:
+            return "Enchantment"
+        if "planeswalker" in tl:
+            return "Planeswalker"
+        if "land" in tl:
+            return "Land"
+        if "battle" in tl:
+            return "Battle"
+        return "Other"
+
+    @property
+    def short_type_line(self) -> str:
+        """Returns clean, concise type line for cards."""
+        if not self.type_line:
+            return self.primary_card_type
+        tl = self.type_line
+        if " — " in tl:
+            return tl.split(" — ")[0].strip()
+        if " // " in tl:
+            return tl.split(" // ")[0].strip()
+        return tl
+
+    @property
+    def color_bucket(self) -> str:
+        """Resolves physical binder color section: W, U, B, R, G, Multicolor, Colorless, Land."""
+        tl = (self.type_line or "").lower()
+        if "land" in tl:
+            return "Land"
+
+        color_str = self.colors if (self.colors is not None and str(self.colors).strip()) else (self.color_identity or "")
+        c_set = set()
+        if color_str:
+            if isinstance(color_str, (list, tuple)):
+                c_set = {str(c).strip().upper() for c in color_str if str(c).strip()}
+            else:
+                cleaned = str(color_str).replace("[", "").replace("]", "").replace("'", "").replace('"', "").replace(" ", "")
+                c_set = {c.upper() for c in cleaned.split(",") if c}
+
+        # Fallback to inspecting mana_cost if color is not explicitly set
+        if not c_set and self.mana_cost:
+            for symbol, char in [("{W}", "W"), ("{U}", "U"), ("{B}", "B"), ("{R}", "R"), ("{G}", "G")]:
+                if symbol in self.mana_cost.upper():
+                    c_set.add(char)
+
+        if len(c_set) == 0:
+            return "Colorless"
+        elif len(c_set) > 1:
+            return "Multicolor"
+        else:
+            single = list(c_set)[0]
+            if single in ("W", "U", "B", "R", "G"):
+                return single
+            return "Colorless"
+
+    @property
+    def computed_cmc(self) -> float:
+        """Returns CMC from column or parsed from mana_cost."""
+        if self.cmc is not None:
+            try:
+                return float(self.cmc)
+            except (ValueError, TypeError):
+                pass
+        if not self.mana_cost:
+            return 0.0
+        # Parse symbols e.g. {2}{U}{U} -> 4.0
+        import re
+        total = 0.0
+        symbols = re.findall(r"\{([^}]+)\}", self.mana_cost)
+        for s in symbols:
+            s_clean = s.strip()
+            if s_clean.isdigit():
+                total += float(s_clean)
+            elif "/" in s_clean:
+                # hybrid / phyrexian mana like 2/W or W/U
+                parts = s_clean.split("/")
+                nums = [float(p) for p in parts if p.isdigit()]
+                total += max(nums) if nums else 1.0
+            elif s_clean.upper() in ("X", "Y", "Z"):
+                pass
+            else:
+                total += 1.0
+        return total
 
     def __repr__(self) -> str:
         return f"<Card {self.name!r} [{self.set_code} #{self.collector_number}]>"
@@ -173,6 +277,22 @@ class BinderItem(db.Model):
     def has_meeple_snapshot(self) -> bool:
         return self.mm_checked_at is not None
 
+    @property
+    def primary_card_type(self) -> str:
+        return self.card.primary_card_type if self.card else "Other"
+
+    @property
+    def short_type_line(self) -> str:
+        return self.card.short_type_line if self.card else "Other"
+
+    @property
+    def color_bucket(self) -> str:
+        return self.card.color_bucket if self.card else "Colorless"
+
+    @property
+    def computed_cmc(self) -> float:
+        return self.card.computed_cmc if self.card else 0.0
+
     def __repr__(self) -> str:
         return f"<BinderItem id={self.id} user={self.user_id} status={self.status!r}>"
 
@@ -212,3 +332,28 @@ class DriveImport(db.Model):
 
     def __repr__(self) -> str:
         return f"<DriveImport id={self.id} user={self.user_id} file={self.file_name!r} status={self.status!r}>"
+
+
+class ActivityLog(db.Model):
+    """Tracks authentication events, card imports, drive syncs, and administrative actions."""
+
+    __tablename__ = "activity_logs"
+
+    id = db.Column(Integer, primary_key=True)
+    user_id = db.Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    user_email = db.Column(String(255), nullable=True, index=True)
+    user_name = db.Column(String(100), nullable=True)
+    action = db.Column(String(100), nullable=False, index=True)  # LOGIN_SUCCESS, LOGIN_DEV, CSV_IMPORT, QUICK_IMPORT, DRIVE_IMPORT, etc.
+    details = db.Column(Text, nullable=True)
+    ip_address = db.Column(String(64), nullable=True)
+    created_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
+
+    user = db.relationship("User", back_populates="activity_logs")
+
+    __table_args__ = (
+        Index("idx_activity_logs_created", desc("created_at")),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ActivityLog id={self.id} action={self.action!r} email={self.user_email!r}>"
+

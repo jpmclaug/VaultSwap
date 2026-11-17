@@ -1,22 +1,122 @@
 {% extends "base.html" %}
 
-{% block title %}Admin · Pod Users // VaultSwap{% endblock %}
+{% block title %}Admin · Pod & User Activity // VaultSwap{% endblock %}
 
 {% block content %}
-<div class="space-y-4">
+<div class="space-y-5">
+    <!-- Header -->
     <div class="flex items-center justify-between">
         <div>
-            <h1 class="text-lg font-extrabold text-white tracking-tight">Pod Users</h1>
-            <p class="text-xs text-slate-400">VaultSwap is invite-only. Add Google emails below to grant access.</p>
+            <h1 class="text-lg font-extrabold text-white tracking-tight">Pod Administration</h1>
+            <p class="text-xs text-slate-400">Manage invite-only pod membership and inspect user logins &amp; upload activity.</p>
         </div>
         <span class="text-[11px] font-semibold bg-slate-900 border border-slate-800 text-slate-300 px-2.5 py-1 rounded-full">
-            {{ users|length }} total
+            {{ users|length }} member{{ '' if users|length == 1 else 's' }}
         </span>
     </div>
 
-    <!-- Add User Form -->
-    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
-        <h2 class="text-sm font-bold text-white">Add User</h2>
+    <!-- Section Navigation Pills (Members vs Activity Log) -->
+    <div class="flex items-center gap-2 border-b border-slate-800/80 pb-2">
+        <a href="#section-users" class="px-3.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs font-bold text-slate-200 hover:text-white transition">
+            👥 Pod Users ({{ users|length }})
+        </a>
+        <a href="#section-activity" class="px-3.5 py-1.5 rounded-xl bg-slate-900 border border-emerald-500/30 text-xs font-bold text-emerald-300 hover:text-emerald-200 transition">
+            📋 User Activity Log ({{ activity_logs|length }})
+        </a>
+    </div>
+
+    <!-- Section 1: User Activity Log -->
+    <section id="section-activity" class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3.5 shadow-sm">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div>
+                <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>User Action &amp; Audit Log</span>
+                </h2>
+                <p class="text-[11px] text-slate-400">Live surveillance of user logins, CSV/Drive uploads, and administrative actions.</p>
+            </div>
+
+            <!-- Action Filters -->
+            <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                {% set act_filters = [
+                    ('all', 'All Activity'),
+                    ('logins', '🔐 Logins'),
+                    ('uploads', '📦 Uploads'),
+                    ('admin', '⚙️ Admin')
+                ] %}
+                {% for f_val, f_label in act_filters %}
+                <a href="{{ url_for('admin_users', action=f_val, user_id=selected_user_id) }}"
+                   class="shrink-0 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition
+                   {% if action_filter == f_val %}bg-emerald-500 text-slate-950 border-emerald-400{% else %}bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200{% endif %}">
+                    {{ f_label }}
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+
+        {% if activity_logs %}
+        <div class="divide-y divide-slate-800/80 border border-slate-800 rounded-xl overflow-hidden bg-slate-950 text-xs">
+            {% for log in activity_logs %}
+            <div class="p-3 flex items-start justify-between gap-3 hover:bg-slate-900/50 transition">
+                <div class="flex items-start gap-2.5 min-w-0">
+                    <!-- Action Icon Badge -->
+                    <span class="w-7 h-7 rounded-lg shrink-0 flex items-center justify-center font-bold text-xs
+                        {% if 'LOGIN' in log.action %}bg-sky-500/15 text-sky-300 border border-sky-500/30
+                        {% elif 'UPLOAD' in log.action or 'ADD' in log.action %}bg-emerald-500/15 text-emerald-300 border border-emerald-500/30
+                        {% elif 'ADMIN' in log.action %}bg-amber-500/15 text-amber-300 border border-amber-500/30
+                        {% elif 'LOGOUT' in log.action %}bg-slate-800 text-slate-400 border border-slate-700
+                        {% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
+                        {% if 'LOGIN' in log.action %}🔐
+                        {% elif 'DRIVE' in log.action %}⚡
+                        {% elif 'UPLOAD' in log.action or 'ADD' in log.action %}📦
+                        {% elif 'ADMIN' in log.action %}⚙️
+                        {% elif 'LOGOUT' in log.action %}🚪
+                        {% else %}📝{% endif %}
+                    </span>
+
+                    <div class="min-w-0">
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                            <span class="font-bold text-white">{{ log.user_name or log.user_email or 'Guest / System' }}</span>
+                            {% if log.user_email and log.user_name and log.user_name != log.user_email %}
+                            <span class="text-[10px] text-slate-500">({{ log.user_email }})</span>
+                            {% endif %}
+                            <span class="text-[9px] font-mono px-1.5 py-0.5 rounded uppercase font-bold
+                                {% if 'LOGIN' in log.action %}bg-sky-950 text-sky-400 border border-sky-800/60
+                                {% elif 'UPLOAD' in log.action or 'ADD' in log.action %}bg-emerald-950 text-emerald-400 border border-emerald-800/60
+                                {% elif 'ADMIN' in log.action %}bg-amber-950 text-amber-400 border border-amber-800/60
+                                {% else %}bg-slate-900 text-slate-400 border border-slate-800{% endif %}">
+                                {{ log.action }}
+                            </span>
+                        </div>
+
+                        {% if log.details %}
+                        <div class="text-[11px] text-slate-300 mt-0.5 leading-relaxed break-words">
+                            {{ log.details }}
+                        </div>
+                        {% endif %}
+
+                        <div class="flex items-center gap-2 text-[10px] text-slate-500 mt-1 font-mono">
+                            <span>{{ log.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') if log.created_at else '' }}</span>
+                            {% if log.ip_address %}
+                            <span>&bull;</span>
+                            <span>IP: {{ log.ip_address }}</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="p-6 text-center border border-dashed border-slate-800 rounded-xl bg-slate-950 text-xs text-slate-400">
+            No activity logs match the selected filter. Logins and uploads will record here automatically.
+        </div>
+        {% endif %}
+    </section>
+
+    <!-- Section 2: Add User Form -->
+    <section id="section-users" class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-sm">
+        <h2 class="text-sm font-bold text-white">Invite Pod User</h2>
         <form action="{{ url_for('admin_users') }}" method="POST" class="space-y-3">
             <div>
                 <label class="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Google Email</label>
@@ -31,7 +131,7 @@
             <label class="flex items-center gap-2.5 text-xs text-slate-300 cursor-pointer select-none">
                 <input type="checkbox" name="is_admin" value="1"
                        class="w-4 h-4 rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500">
-                <span>Make admin (can add &amp; manage pod users)</span>
+                <span>Make admin (can view activity logs and invite pod users)</span>
             </label>
             <button type="submit"
                     class="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 rounded-xl transition">
@@ -40,8 +140,11 @@
         </form>
     </section>
 
-    <!-- User List -->
-    <section class="bg-slate-900 border border-slate-800 rounded-2xl divide-y divide-slate-800/80 overflow-hidden">
+    <!-- Section 3: User List -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl divide-y divide-slate-800/80 overflow-hidden shadow-sm">
+        <div class="p-3 bg-slate-950/60 font-bold text-xs text-slate-300">
+            Registered &amp; Invited Pod Members ({{ users|length }})
+        </div>
         {% for u in users %}
         <div class="p-3.5 flex items-center justify-between gap-3">
             <div class="flex items-center gap-3 min-w-0">
@@ -65,8 +168,14 @@
                         {% endif %}
                     </div>
                     <div class="text-xs text-slate-400 truncate">{{ u.email }}</div>
-                    <div class="text-[10px] text-slate-500 mt-0.5">
-                        {{ card_counts.get(u.id, 0) }} cards · Joined {{ u.created_at.strftime('%Y-%m-%d') if u.created_at else '' }}
+                    <div class="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2">
+                        <span>{{ card_counts.get(u.id, 0) }} cards</span>
+                        <span>&bull;</span>
+                        <span>Joined {{ u.created_at.strftime('%Y-%m-%d') if u.created_at else '' }}</span>
+                        <span>&bull;</span>
+                        <a href="{{ url_for('admin_users', user_id=u.id) }}" class="text-emerald-400 hover:underline">
+                            View Logs &rarr;
+                        </a>
                     </div>
                 </div>
             </div>

@@ -87,6 +87,47 @@ To stop the server: double-click `stop.bat` or run `.\stop_app.ps1`.
 
 ---
 
+## 🔌 MCP Server (Trade Feed & Card Metadata)
+
+VaultSwap includes a read-only **Model Context Protocol (MCP)** server (`mcp_server.py`) so AI assistants and MCP clients can browse what cards pod members have put up for trade (`for_trade` and `meeple_bound`) and inspect full listing, Scryfall, Mighty Meeple, and trader metadata (while strictly excluding `private` binder items).
+
+### Tools
+- **`list_trade_cards`**: Search and filter public pod trade listings by card query, `status` (`all`, `for_trade`, `meeple_bound`), `owner`, `set_code`, `type_line`, `finish`, `condition`, `min_price`/`max_price`, `meeple_in_stock`, and sort order (`priority`, `price_desc`, `price_asc`, `updated_desc`, `name_asc`).
+- **`get_trade_card_metadata`**: Retrieve deep metadata for a trade listing (`item_id`, `scryfall_id`, or `card_name`), including cross-printing copies available across the pod, 24-hour pod-cached Mighty Meeple buylist quotes, and optional live Scryfall oracle/legality enrichment (`include_live_scryfall=true`).
+- **`list_pod_traders`**: List pod members with active trade listings and their trade binder valuations.
+- **`get_pod_trade_summary`**: Pod-wide trade statistics, aggregate valuations, top-value trade cards, and multi-copy oracle groups.
+
+### Resources
+- `vaultswap://trades/feed` — JSON snapshot of active public trade listings.
+- `vaultswap://trades/summary` — JSON summary of pod trade statistics.
+
+### Gemini / Antigravity Skill Setup
+A complete guide and ready-to-use workspace skill have been created:
+- 📖 **[Gemini Skill Setup Guide](file:///c:/Users/jpmcl/Python%20Development/VaultSwap/docs/GEMINI_SKILL_SETUP.md)**: Step-by-step instructions for wiring up the MCP tools and registering the skill.
+- 🛠️ **[SKILL.md](file:///c:/Users/jpmcl/Python%20Development/VaultSwap/.agents/skills/vaultswap-trade-assistant/SKILL.md)**: The skill definition instructing Gemini on how to browse trades, compare printings, and check Mighty Meeple quotes.
+
+### Running & Client Configuration
+Run via stdio (default for MCP clients) or Streamable HTTP:
+```bash
+python mcp_server.py
+# or over Streamable HTTP:
+python mcp_server.py --transport streamable-http --port 8000
+```
+
+Example `mcp_config.json` entry:
+```json
+{
+  "mcpServers": {
+    "vaultswap-trades": {
+      "command": "C:\\Users\\jpmcl\\Python Development\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\jpmcl\\Python Development\\VaultSwap\\mcp_server.py"]
+    }
+  }
+}
+```
+
+---
+
 ## 🧪 Testing
 
 Run the full pytest suite:
@@ -94,7 +135,7 @@ Run the full pytest suite:
 pytest -v
 ```
 
-All 18 tests verify row-level scoping, 75-card Scryfall collection batching, zero Mighty Meeple traffic on import, 24-hour pod cache sharing, sequential rate-limit guard, duplicate filtering, invite-only admin access, demo removal, and incremental Google Drive streaming imports.
+All tests verify row-level scoping, 75-card Scryfall collection batching, zero Mighty Meeple traffic on import, 24-hour pod cache sharing, sequential rate-limit guard, duplicate filtering, invite-only admin access, demo removal, incremental Google Drive streaming imports, and the VaultSwap Trade MCP server privacy boundaries, filters, metadata serialization, and resources.
 
 ---
 
