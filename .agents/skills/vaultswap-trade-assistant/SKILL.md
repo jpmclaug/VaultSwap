@@ -51,7 +51,7 @@ Tool Name | Description | Key Parameters
    - Card name, set code, collector number, finish (`foil`, `etched`, `nonfoil`), condition.
    - Quantity available.
    - Trader handle (e.g. `@Jason` or Discord handle).
-   - Scryfall unit market price and Mighty Meeple buylist cash/credit quotes (if present).
+   - Scryfall unit market price and Mighty Meeple buylist trade-in credit / cash quotes (if present).
 
 ### Workflow B: "Who has [Card Name] for trade?"
 1. Call `get_trade_card_metadata(card_name="<Card Name>", include_live_scryfall=True, include_cached_meeple=True)`.

@@ -153,9 +153,9 @@
             <span class="text-slate-600 mx-1">&bull;</span>
             <span class="text-amber-300 font-semibold">
                 Buylist:
-                {% if item.mm_buylist_cash is not none %}${{ '%.2f'|format(item.mm_buylist_cash) }} Cash{% else %}N/A{% endif %}
-                /
                 {% if item.mm_buylist_credit is not none %}${{ '%.2f'|format(item.mm_buylist_credit) }} Credit{% else %}N/A{% endif %}
+                /
+                {% if item.mm_buylist_cash is not none %}${{ '%.2f'|format(item.mm_buylist_cash) }} Cash{% else %}N/A{% endif %}
             </span>
         </div>
         <button type="button"

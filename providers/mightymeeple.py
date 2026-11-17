@@ -85,7 +85,7 @@ class MightyMeepleProvider:
         set_name: Optional[str] = None,
         collector_number: Optional[str] = None,
         finish: str = "nonfoil",
-        condition: str = "NM",
+        condition: str = "LP",
     ) -> Dict[str, Any]:
         """
         Fetches a point-in-time Mighty Meeple retail + buylist snapshot for a single card.
@@ -136,7 +136,7 @@ class MightyMeepleProvider:
 
             quote = self._find_variant_quote(
                 best_item.get("variants", []),
-                condition=condition or "NM",
+                condition="LP",
                 finish=finish or "nonfoil",
             )
             if quote:
@@ -655,13 +655,13 @@ class MightyMeepleProvider:
     @staticmethod
     def _find_variant_quote(
         variants: List[Dict[str, Any]],
-        condition: str = "NM",
+        condition: str = "LP",
         finish: str = "nonfoil",
     ) -> Optional[Dict[str, Any]]:
         if not variants:
             return None
 
-        cond_clean = (condition or "NM").lower().strip()
+        cond_clean = (condition or "LP").lower().strip()
         cond_map = {
             "nm": "near",
             "near mint": "near",

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import Numeric, Text, Boolean, Integer, String, DateTime, ForeignKey, Index, desc, text
+from sqlalchemy.orm import validates
 from sqlalchemy.types import TypeDecorator, Uuid
 
 db = SQLAlchemy()
@@ -272,6 +273,18 @@ class BinderItem(db.Model):
     @property
     def is_public(self) -> bool:
         return self.status in ("for_trade", "meeple_bound")
+
+    @validates("status")
+    def _validate_status(self, key: str, value: str) -> str:
+        if value == "meeple_bound":
+            self.condition = "LP"
+        return value
+
+    @validates("condition")
+    def _validate_condition(self, key: str, value: Optional[str]) -> str:
+        if self.status == "meeple_bound":
+            return "LP"
+        return value or "NM"
 
     @property
     def has_meeple_snapshot(self) -> bool:

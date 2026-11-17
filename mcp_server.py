@@ -195,10 +195,10 @@ def serialize_trade_item(
             "has_snapshot": has_snapshot,
             "in_stock": in_stock,
             "retail_price": retail_price,
-            "buylist_cash": buylist_cash,
-            "line_buylist_cash": line_buylist_cash,
             "buylist_credit": buylist_credit,
             "line_buylist_credit": line_buylist_credit,
+            "buylist_cash": buylist_cash,
+            "line_buylist_cash": line_buylist_cash,
             "checked_at": checked_at,
         },
     }

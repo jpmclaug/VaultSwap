@@ -224,6 +224,12 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     app.config.from_object(Config)
     if test_config:
         app.config.update(test_config)
+        if "SQLALCHEMY_DATABASE_URI" in test_config and "SQLALCHEMY_ENGINE_OPTIONS" not in test_config:
+            from config import _build_engine_options
+            app.config["SQLALCHEMY_ENGINE_OPTIONS"] = _build_engine_options(
+                test_config["SQLALCHEMY_DATABASE_URI"],
+                str(test_config.get("DATABASE_URL_POOLED", "")),
+            )
 
     db.init_app(app)
 
@@ -262,6 +268,8 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         if "cmc" not in card_cols:
             with db.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE cards ADD COLUMN cmc NUMERIC(6, 2)"))
+        with db.engine.begin() as conn:
+            conn.execute(text("UPDATE binder_items SET condition = 'LP' WHERE status = 'meeple_bound'"))
 
     def log_activity(
         action: str,
@@ -748,6 +756,8 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         item = BinderItem.query.filter_by(id=item_id, user_id=user.id).first_or_404()
         item.status = new_status
+        if new_status == "meeple_bound":
+            item.condition = "LP"
         item.updated_at = utc_now()
 
         # Only query Mighty Meeple if tagging for trade/buylist AND never checked before
@@ -759,7 +769,7 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 scryfall_id=item.scryfall_id,
                 collector_number=item.card.collector_number,
                 set_name=item.card.set_name,
-                condition=item.condition or "NM",
+                condition=item.condition or "LP",
             )
             if mm_data:
                 services.apply_meeple_snapshot(item, mm_data)
@@ -786,7 +796,7 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             scryfall_id=item.scryfall_id,
             collector_number=item.card.collector_number,
             set_name=item.card.set_name,
-            condition=item.condition or "NM",
+            condition=item.condition or "LP",
             force_refresh=True,
         )
         if mm_data:
@@ -903,6 +913,8 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         for item in items:
             item.status = new_status
+            if new_status == "meeple_bound":
+                item.condition = "LP"
             item.updated_at = now
             if new_status in ("for_trade", "meeple_bound") and item.mm_checked_at is None:
                 cached = services.find_cached_meeple_snapshot(

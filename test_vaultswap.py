@@ -275,10 +275,15 @@ def test_htmx_status_toggle_on_tag_snapshot_and_no_requery_when_checked(app, cli
             assert "Meeple: In Stock ($14.99)" in html
             assert "$7.50 Cash" in html
             assert "$9.75 Credit" in html
+            # Mighty Meeple trade-in / credit listed before cash
+            assert html.index("$9.75 Credit") < html.index("$7.50 Cash")
 
             # 3. Switching to 'meeple_bound', back to 'private', and back to 'meeple_bound'
             #    does NOT re-query Mighty Meeple because mm_checked_at is already populated
             client.post(f"/binder/{item_id}/status", data={"status": "meeple_bound"})
+            item_mb = db.session.get(BinderItem, item_id)
+            assert item_mb.status == "meeple_bound"
+            assert item_mb.condition == "LP"
             client.post(f"/binder/{item_id}/status", data={"status": "private"})
             resp_again = client.post(f"/binder/{item_id}/status", data={"status": "meeple_bound"})
             assert resp_again.status_code == 200
@@ -299,6 +304,7 @@ def test_htmx_status_toggle_on_tag_snapshot_and_no_requery_when_checked(app, cli
             assert "Meeple: Out of Stock ($16.50)" in refresh_html
             assert "$8.00 Cash" in refresh_html
             assert "$10.40 Credit" in refresh_html
+            assert refresh_html.index("$10.40 Credit") < refresh_html.index("$8.00 Cash")
 
 
 def test_pod_wide_24h_meeple_cache_sharing(app, client):
@@ -1437,6 +1443,89 @@ def test_mcp_traders_and_summary_and_resources(app, client):
         }.issubset(resource_uris)
 
     anyio.run(_check_mcp_registry)
+
+
+def test_buylist_tradein_first_and_lightly_played_condition(app, client):
+    """Verifies buylist displays trade-in/credit first then cash, and always marks card as lightly played."""
+    with app.app_context():
+        card = _make_card("Cyclonic Rift", "RTR", "35", usd_price=35.00)
+        alice = _login_user(client, "alice_bl@pod.local", "Alice BL")
+
+        # 1. BinderItem creation with meeple_bound automatically sets condition to LP
+        item1 = BinderItem(
+            user_id=alice.id,
+            scryfall_id=card.scryfall_id,
+            quantity=1,
+            finish="nonfoil",
+            status="meeple_bound",
+            condition="NM",  # Should be overridden to LP
+        )
+        db.session.add(item1)
+        db.session.commit()
+        assert item1.condition == "LP"
+
+        # 2. Updating item status to meeple_bound marks condition as LP
+        item2 = BinderItem(
+            user_id=alice.id,
+            scryfall_id=card.scryfall_id,
+            quantity=1,
+            finish="nonfoil",
+            status="private",
+            condition="NM",
+        )
+        db.session.add(item2)
+        db.session.commit()
+        assert item2.condition == "NM"
+
+        client.post(f"/binder/{item2.id}/status", data={"status": "meeple_bound"})
+        item2_refreshed = db.session.get(BinderItem, item2.id)
+        assert item2_refreshed.status == "meeple_bound"
+        assert item2_refreshed.condition == "LP"
+
+        # 3. Bulk status update to meeple_bound sets condition to LP
+        item3 = BinderItem(
+            user_id=alice.id,
+            scryfall_id=card.scryfall_id,
+            quantity=1,
+            finish="nonfoil",
+            status="private",
+            condition="NM",
+        )
+        db.session.add(item3)
+        db.session.commit()
+        client.post("/binder/bulk-status", json={"item_ids": [item3.id], "status": "meeple_bound"})
+        item3_refreshed = db.session.get(BinderItem, item3.id)
+        assert item3_refreshed.condition == "LP"
+
+        # 4. MightyMeepleProvider.get_card_snapshot defaults and uses LP for buylist quote
+        provider = MightyMeepleProvider()
+        fake_variants = [
+            {"condition": "Near Mint", "finish": "Non-foil", "buyPrice": 12.00, "creditBuyPrice": 15.00},
+            {"condition": "Lightly Played", "finish": "Non-foil", "buyPrice": 10.00, "creditBuyPrice": 13.00},
+        ]
+        chosen = provider._find_variant_quote(fake_variants, condition="LP", finish="nonfoil")
+        assert chosen["condition"] == "Lightly Played"
+        assert chosen["buyPrice"] == 10.00
+        assert chosen["creditBuyPrice"] == 13.00
+
+        # 5. Pod feed and binder row render credit first then cash
+        item1.mm_buylist_cash = 10.00
+        item1.mm_buylist_credit = 13.00
+        item1.mm_checked_at = utc_now()
+        db.session.commit()
+
+        # Binder row check
+        binder_html = client.get("/binder?filter=meeple_bound").get_data(as_text=True)
+        assert "$13.00 Credit" in binder_html
+        assert "$10.00 Cash" in binder_html
+        assert binder_html.index("$13.00 Credit") < binder_html.index("$10.00 Cash")
+
+        # Pod feed check
+        feed_html = client.get("/pod").get_data(as_text=True)
+        assert "$13.00 Credit" in feed_html
+        assert "$10.00 Cash" in feed_html
+        assert feed_html.index("$13.00 Credit") < feed_html.index("$10.00 Cash")
+
 
 
 
