@@ -6,22 +6,45 @@ This guide explains how to connect Gemini / Antigravity to the **VaultSwap Trade
 
 ## 1. How the Architecture Works
 
-```mermaid
-flowchart LR
-    User["User Prompt"] --> Agent["Gemini / Antigravity Agent"]
-    Agent -->|"Activated when discussing MTG trades"| Skill["Skill: vaultswap-trade-assistant"]
-    Skill -->|"Instructs agent which tool to call"| Tools["MCP Tools (list_trade_cards, etc.)"]
-    Tools -->|"mcp_config.json"| MCPServer["mcp_server.py (FastMCP)"]
-    MCPServer --> DB[("VaultSwap DB")]
-```
-
-1. **MCP Server (`mcp_server.py`)**: Runs locally and exposes the tools (`list_trade_cards`, `get_trade_card_metadata`, `list_pod_traders`, `get_pod_trade_summary`) over standard I/O (`stdio`).
-2. **MCP Config (`mcp_config.json`)**: Tells Gemini how to launch the MCP server executable.
-3. **Skill (`SKILL.md`)**: Teaches Gemini *when* and *how* to invoke those tools (playbooks for searching cards, comparing printings, and checking Mighty Meeple buylist snapshots).
+There are two primary environments where you can use this MCP server with Gemini:
+1. **Desktop / Antigravity IDE**: Runs the server directly as a local Python process over standard I/O (`stdio`).
+2. **Gemini Mobile App (iOS / Android)**: Mobile operating systems cannot run local Python processes directly. Google routes custom MCP tools through your personal Google Account sync: you link your server's public HTTPS endpoint on the web, and it instantly syncs to the Gemini mobile app.
 
 ---
 
-## 2. Step 1: Register the MCP Server in Gemini
+## 2. Using with the Gemini Mobile App (iOS & Android)
+
+### Why this flow is required
+On mobile devices (phones/tablets), you cannot paste local Windows `.exe` paths or command lines. Instead, Google uses **Connected Apps** synced across your account.
+
+### Step-by-Step Mobile Setup:
+1. **Host or Tunnel your MCP Server**:
+   The MCP server needs to be accessible via HTTPS. You can:
+   - Run VaultSwap in Streamable HTTP mode on Cloud Run:
+     ```bash
+     python mcp_server.py --transport streamable-http --port 8000
+     ```
+   - Or use a free tunnel (e.g. ngrok or Cloudflare Tunnel) while developing locally:
+     ```bash
+     ngrok http 8000
+     ```
+2. **Link the MCP URL on Gemini Web**:
+   - Open a browser (on your phone or computer) and go to **[gemini.google.com](https://gemini.google.com)** or **[gemini.google.com/devmode](https://gemini.google.com/devmode)**.
+   - Ensure you are logged into the **same personal Google account** as your mobile app.
+   - Go to **Settings > Connected Apps** and tap **+ Create new / Add Custom App**.
+   - Paste your server's public HTTPS URL (e.g., `https://your-service.run.app/mcp` or `https://xyz.ngrok-free.app/mcp`).
+   - Save the app (e.g., named **VaultSwap**).
+3. **Use on your Phone**:
+   - Open the **Gemini mobile app** on your iOS or Android device.
+   - In any chat, type `@VaultSwap` or simply ask:
+     - *"What cards are currently up for trade in the pod?"*
+     - *"Who has a Sol Ring or Rhystic Study?"*
+     - *"Show me all foil cards available for trade over $10."*
+   - Gemini on your phone will execute the tools on your MCP server and respond with real-time trade listings and Mighty Meeple quotes!
+
+---
+
+## 3. Using on Desktop / Antigravity (Local stdio)
 
 To make the tools callable by Gemini across all sessions, add the server to your Gemini config.
 
