@@ -95,6 +95,23 @@ class Config:
     # Local Dev Login Mode (enabled automatically when Google OAuth is unconfigured)
     DEV_LOGIN_ENABLED = os.getenv("DEV_LOGIN_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
+    # Admin & Access Control
+    ADMIN_EMAILS = {
+        e.strip().lower()
+        for e in os.getenv("ADMIN_EMAILS", "jpmclaug@gmail.com").split(",")
+        if e.strip()
+    }
+    INVITE_ONLY = os.getenv("INVITE_ONLY", "true").strip().lower() in ("1", "true", "yes")
+
+    # Basic CSRF hardening for all state-changing POSTs
+    SESSION_COOKIE_SAMESITE = "Lax"
+
+    # Google Drive Picker import
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+    GOOGLE_CLOUD_PROJECT_NUMBER = os.getenv("GOOGLE_CLOUD_PROJECT_NUMBER", "").strip()
+    DRIVE_MAX_FILE_MB = int(os.getenv("DRIVE_MAX_FILE_MB", 500))
+    DRIVE_IMPORT_CHUNK_ROWS = int(os.getenv("DRIVE_IMPORT_CHUNK_ROWS", 1000))
+
     # Mighty Meeple Light-Touch Controls
     MEEPLE_CACHE_TTL_HOURS = float(os.getenv("MEEPLE_CACHE_TTL_HOURS", 24))
     MEEPLE_RATE_LIMIT_MIN_SEC = float(os.getenv("MEEPLE_RATE_LIMIT_MIN_SEC", 1.5))

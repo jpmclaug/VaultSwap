@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 from flask import current_app
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, tuple_
 
 from card_utils import fix_mojibake, normalize_card_name, normalize_condition, normalize_finish
 from models import BinderItem, Card, db, utc_now
@@ -333,6 +333,63 @@ class ImportParseError(Exception):
     """Raised when uploaded CSV or pasted card text cannot be parsed."""
 
 
+def build_header_map(header_row: List[str]) -> Dict[str, int]:
+    """Maps recognized CSV header aliases to column indices."""
+    header_map: Dict[str, int] = {}
+    for idx, col in enumerate(header_row):
+        col_clean = str(col).strip().lower().replace('"', "").replace("'", "")
+        canonical = HEADER_ALIASES.get(col_clean)
+        if canonical and canonical not in header_map:
+            header_map[canonical] = idx
+    return header_map
+
+
+def parse_csv_row(
+    row: List[str],
+    header_map: Dict[str, int],
+    row_num: int,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Parses a single CSV row into (entry_dict, error_dict). Returns (None, None) for blank rows."""
+    if not row or not any(str(cell).strip() for cell in row):
+        return None, None
+
+    name_idx = header_map["name"]
+    if name_idx >= len(row):
+        return None, {"row": row_num, "error": "Row missing Name column."}
+
+    raw_name = str(row[name_idx]).strip()
+    norm_name = normalize_card_name(raw_name)
+    if not norm_name:
+        return None, {"row": row_num, "error": "Card name is empty."}
+
+    qty = 1
+    if "quantity" in header_map and header_map["quantity"] < len(row):
+        qty_str = str(row[header_map["quantity"]]).strip()
+        if qty_str:
+            try:
+                qty = int(qty_str)
+                if qty <= 0:
+                    return None, {"row": row_num, "error": f"Quantity must be > 0 for '{norm_name}'."}
+            except ValueError:
+                return None, {"row": row_num, "error": f"Invalid quantity '{qty_str}' for '{norm_name}'."}
+
+    def _col(key: str) -> str:
+        if key in header_map and header_map[key] < len(row):
+            return str(row[header_map[key]]).strip()
+        return ""
+
+    return {
+        "name": norm_name,
+        "set_code": _col("set_code").upper(),
+        "set_name": _col("set_name"),
+        "collector_number": _col("collector_number"),
+        "scryfall_id": _col("scryfall_id").lower(),
+        "quantity": qty,
+        "finish": normalize_finish(_col("foil")),
+        "condition": normalize_condition(_col("condition")),
+    }, None
+
+
 def parse_manabox_csv(csv_content: str) -> Dict[str, Any]:
     """Parses ManaBox or standard MTG collection CSV content."""
     if not csv_content or not csv_content.strip():
@@ -348,12 +405,7 @@ def parse_manabox_csv(csv_content: str) -> Dict[str, Any]:
     if not header_row:
         raise ImportParseError("CSV does not contain a header row.")
 
-    header_map: Dict[str, int] = {}
-    for idx, col in enumerate(header_row):
-        col_clean = str(col).strip().lower().replace('"', "").replace("'", "")
-        canonical = HEADER_ALIASES.get(col_clean)
-        if canonical and canonical not in header_map:
-            header_map[canonical] = idx
+    header_map = build_header_map(header_row)
 
     if "name" not in header_map:
         recognized = [str(c).strip() for c in header_row if str(c).strip()]
@@ -365,48 +417,11 @@ def parse_manabox_csv(csv_content: str) -> Dict[str, Any]:
     errors: List[Dict[str, Any]] = []
 
     for row_num, row in enumerate(reader, start=2):
-        if not row or not any(str(cell).strip() for cell in row):
-            continue
-
-        name_idx = header_map["name"]
-        if name_idx >= len(row):
-            errors.append({"row": row_num, "error": "Row missing Name column."})
-            continue
-
-        raw_name = str(row[name_idx]).strip()
-        norm_name = normalize_card_name(raw_name)
-        if not norm_name:
-            errors.append({"row": row_num, "error": "Card name is empty."})
-            continue
-
-        qty = 1
-        if "quantity" in header_map and header_map["quantity"] < len(row):
-            qty_str = str(row[header_map["quantity"]]).strip()
-            if qty_str:
-                try:
-                    qty = int(qty_str)
-                    if qty <= 0:
-                        errors.append({"row": row_num, "error": f"Quantity must be > 0 for '{norm_name}'."})
-                        continue
-                except ValueError:
-                    errors.append({"row": row_num, "error": f"Invalid quantity '{qty_str}' for '{norm_name}'."})
-                    continue
-
-        def _col(key: str) -> str:
-            if key in header_map and header_map[key] < len(row):
-                return str(row[header_map[key]]).strip()
-            return ""
-
-        entries.append({
-            "name": norm_name,
-            "set_code": _col("set_code").upper(),
-            "set_name": _col("set_name"),
-            "collector_number": _col("collector_number"),
-            "scryfall_id": _col("scryfall_id").lower(),
-            "quantity": qty,
-            "finish": normalize_finish(_col("foil")),
-            "condition": normalize_condition(_col("condition")),
-        })
+        entry, err = parse_csv_row(row, header_map, row_num)
+        if err:
+            errors.append(err)
+        elif entry:
+            entries.append(entry)
 
     if not entries and not errors:
         raise ImportParseError("No card entries found in the CSV file.")
@@ -573,10 +588,71 @@ def _upsert_card_from_scryfall(card_data: Dict[str, Any]) -> Card:
     return card
 
 
+def _bulk_find_local_cards(parsed_entries: List[Dict[str, Any]]) -> Dict[int, Card]:
+    """Batch-resolves entries against the local `cards` table in O(1) queries per 500 items."""
+    sids: List[str] = []
+    set_cols: List[Tuple[str, str]] = []
+    names_only: List[str] = []
+
+    for entry in parsed_entries:
+        sid = str(entry.get("scryfall_id") or "").strip().lower()
+        if sid and UUID_PATTERN.match(sid):
+            sids.append(sid)
+        set_code = str(entry.get("set_code") or "").strip().upper()
+        col_num = str(entry.get("collector_number") or "").strip().lower()
+        if set_code and col_num:
+            set_cols.append((set_code, col_num))
+        elif not set_code and not col_num and entry.get("name"):
+            names_only.append(entry["name"].strip().lower())
+
+    by_sid: Dict[str, Card] = {}
+    unique_sids = list(dict.fromkeys(sids))
+    for i in range(0, len(unique_sids), 500):
+        chunk = unique_sids[i : i + 500]
+        for card in Card.query.filter(Card.scryfall_id.in_(chunk)).all():
+            by_sid[str(card.scryfall_id).lower()] = card
+
+    by_set_col: Dict[Tuple[str, str], Card] = {}
+    unique_set_cols = list(dict.fromkeys(set_cols))
+    for i in range(0, len(unique_set_cols), 500):
+        chunk = unique_set_cols[i : i + 500]
+        rows = Card.query.filter(
+            tuple_(func.upper(Card.set_code), func.lower(Card.collector_number)).in_(chunk)
+        ).all()
+        for card in rows:
+            by_set_col[(card.set_code.upper(), card.collector_number.lower())] = card
+
+    by_name: Dict[str, Card] = {}
+    unique_names = list(dict.fromkeys(names_only))
+    for i in range(0, len(unique_names), 500):
+        chunk = unique_names[i : i + 500]
+        for card in Card.query.filter(func.lower(Card.name).in_(chunk)).all():
+            by_name.setdefault(card.name.strip().lower(), card)
+
+    resolved: Dict[int, Card] = {}
+    for idx, entry in enumerate(parsed_entries):
+        sid = str(entry.get("scryfall_id") or "").strip().lower()
+        if sid and sid in by_sid:
+            resolved[idx] = by_sid[sid]
+            continue
+        set_code = str(entry.get("set_code") or "").strip().upper()
+        col_num = str(entry.get("collector_number") or "").strip().lower()
+        if set_code and col_num and (set_code, col_num) in by_set_col:
+            resolved[idx] = by_set_col[(set_code, col_num)]
+            continue
+        if not set_code and not col_num and entry.get("name"):
+            name_key = entry["name"].strip().lower()
+            if name_key in by_name:
+                resolved[idx] = by_name[name_key]
+
+    return resolved
+
+
 def import_cards_to_binder(
     user_id: int,
     parsed_entries: List[Dict[str, Any]],
     scryfall_provider: Optional[ScryfallProvider] = None,
+    commit: bool = True,
 ) -> Dict[str, Any]:
     """
     Imports parsed cards into `user_id`'s private binder using local `cards` cache +
@@ -586,21 +662,22 @@ def import_cards_to_binder(
     if not parsed_entries:
         return {"imported_rows": 0, "total_quantity": 0, "unresolved": []}
 
-    resolved_cards: Dict[int, Card] = {}
-    missing_indices: List[int] = []
-
-    for idx, entry in enumerate(parsed_entries):
-        local = _find_local_card(entry)
-        if local is not None:
-            resolved_cards[idx] = local
-        else:
-            missing_indices.append(idx)
+    resolved_cards = _bulk_find_local_cards(parsed_entries)
+    missing_indices = [idx for idx in range(len(parsed_entries)) if idx not in resolved_cards]
 
     unresolved_names: List[str] = []
     if missing_indices:
         sf = scryfall_provider or ScryfallProvider()
         missing_entries = [parsed_entries[i] for i in missing_indices]
         sf_resolved, sf_unresolved = sf.resolve_collection_batch(missing_entries, fallback_named=True)
+
+        # Prefetch any Scryfall-returned cards that already exist locally by scryfall_id
+        # (e.g. when entry lacked scryfall_id or had mismatched set/collector)
+        returned_sids = list({str(c["scryfall_id"]).lower() for c in sf_resolved.values()})
+        for i in range(0, len(returned_sids), 500):
+            chunk = returned_sids[i : i + 500]
+            # SQLAlchemy identity map caches fetched Card objects for db.session.get()
+            Card.query.filter(Card.scryfall_id.in_(chunk)).all()
 
         # Deduplicate upserts by scryfall_id within the same batch
         batch_cards: Dict[str, Card] = {}
@@ -620,6 +697,12 @@ def import_cards_to_binder(
 
         db.session.flush()
 
+    # Batch-prefetch existing private binder rows for this user
+    existing_map: Dict[Tuple[str, str, str], BinderItem] = {}
+    for item in BinderItem.query.filter_by(user_id=user_id, status="private").all():
+        key = (str(item.scryfall_id).lower(), item.finish, item.condition or "NM")
+        existing_map.setdefault(key, item)
+
     now = utc_now()
     imported_rows = 0
     total_qty = 0
@@ -632,16 +715,9 @@ def import_cards_to_binder(
         qty = max(1, int(entry.get("quantity") or 1))
         finish = normalize_finish(entry.get("finish"))
         condition = normalize_condition(entry.get("condition"))
+        key = (str(card_obj.scryfall_id).lower(), finish, condition)
 
-        # Merge into an existing private row for the exact printing/finish/condition if present
-        existing = BinderItem.query.filter_by(
-            user_id=user_id,
-            scryfall_id=card_obj.scryfall_id,
-            finish=finish,
-            condition=condition,
-            status="private",
-        ).first()
-
+        existing = existing_map.get(key)
         if existing:
             existing.quantity = (existing.quantity or 0) + qty
             existing.updated_at = now
@@ -658,11 +734,16 @@ def import_cards_to_binder(
                 updated_at=now,
             )
             db.session.add(item)
+            existing_map[key] = item
 
         imported_rows += 1
         total_qty += qty
 
-    db.session.commit()
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
+
     return {
         "imported_rows": imported_rows,
         "total_quantity": total_qty,

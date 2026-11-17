@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import secrets
 from datetime import timedelta
 from functools import wraps
@@ -20,11 +22,13 @@ from flask import (
     url_for,
 )
 import requests
-from sqlalchemy import case, func, or_
+from sqlalchemy import case, func, inspect, or_, text
 
+import drive_sync
 import services
 from config import Config
-from models import BinderItem, Card, User, db, utc_now
+from drive_sync import DriveClient, DriveImportWorker, DriveSyncError
+from models import BinderItem, Card, DriveImport, User, db, utc_now
 from providers.scryfall import ScryfallProvider
 
 try:
@@ -165,6 +169,10 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     meeple_worker.init_app(app)
     app.meeple_worker = meeple_worker  # type: ignore[attr-defined]
 
+    drive_worker = DriveImportWorker()
+    drive_worker.init_app(app)
+    app.drive_worker = drive_worker  # type: ignore[attr-defined]
+
     # Configure Google OAuth 2.0 via Authlib if available
     google_oauth_client = None
     if OAuth is not None and app.config.get("GOOGLE_CLIENT_ID") and app.config.get("GOOGLE_CLIENT_SECRET"):
@@ -177,8 +185,15 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             client_kwargs={"scope": "openid email profile"},
         )
 
+    def _apply_lightweight_migrations() -> None:
+        cols = {c["name"] for c in inspect(db.engine).get_columns("users")}
+        if "is_admin" not in cols:
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE"))
+
     with app.app_context():
         db.create_all()
+        _apply_lightweight_migrations()
 
     def get_current_user() -> Optional[User]:
         user_id = session.get("user_id")
@@ -208,6 +223,20 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         return wrapper
 
+    def admin_required(fn):
+        @wraps(fn)
+        @login_required
+        def wrapper(*args, **kwargs):
+            user = get_current_user()
+            if not user or not user.is_admin:
+                if request.path.startswith("/api/") or request.is_json:
+                    return jsonify({"error": "Admin access required."}), 403
+                flash("Admin access is required to view that page.", "error")
+                return redirect(url_for("binder_view"))
+            return fn(*args, **kwargs)
+
+        return wrapper
+
     @app.context_processor
     def inject_template_globals():
         return {
@@ -220,6 +249,9 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     # Authentication & Profile Routes
     # -------------------------------------------------------------------------
 
+    class NotInvitedError(Exception):
+        """Raised when a non-invited user attempts to sign in while INVITE_ONLY is enabled."""
+
     def _upsert_google_user(
         google_sub: str,
         email: str,
@@ -227,16 +259,22 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         avatar_url: Optional[str] = None,
     ) -> User:
         clean_email = email.strip().lower()
+        admin_emails = {str(e).strip().lower() for e in (app.config.get("ADMIN_EMAILS") or set())}
+        is_bootstrap_admin = clean_email in admin_emails
+
         user = User.query.filter_by(google_sub=google_sub).first()
         if user is None:
             user = User.query.filter(func.lower(User.email) == clean_email).first()
 
         if user is None:
+            if app.config.get("INVITE_ONLY", True) and not is_bootstrap_admin:
+                raise NotInvitedError(clean_email)
             user = User(
                 google_sub=google_sub,
                 email=clean_email,
                 display_name=display_name.strip()[:100] or clean_email.split("@")[0],
                 avatar_url=avatar_url,
+                is_admin=is_bootstrap_admin,
             )
             db.session.add(user)
         else:
@@ -246,6 +284,8 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 user.display_name = display_name.strip()[:100]
             if avatar_url:
                 user.avatar_url = avatar_url
+            if is_bootstrap_admin:
+                user.is_admin = True
 
         db.session.commit()
         return user
@@ -362,6 +402,9 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             session.permanent = True
             session["user_id"] = user.id
             return redirect(next_url or url_for("binder_view"))
+        except NotInvitedError as exc:
+            flash(f"{exc} hasn't been invited to this pod yet. Ask an admin to add you.", "error")
+            return redirect(url_for("login_page"))
         except Exception as exc:
             logger.error("Google OAuth callback error: %s", exc, exc_info=True)
             flash("Authentication handshake failed. Please retry.", "error")
@@ -379,12 +422,16 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             return redirect(url_for("login_page"))
 
         display_name = (data.get("display_name") or email.split("@")[0].title()).strip()
-        user = _upsert_google_user(
-            google_sub=f"dev-{email}",
-            email=email,
-            display_name=display_name,
-            avatar_url=None,
-        )
+        try:
+            user = _upsert_google_user(
+                google_sub=f"dev-{email}",
+                email=email,
+                display_name=display_name,
+                avatar_url=None,
+            )
+        except NotInvitedError as exc:
+            flash(f"{exc} hasn't been invited to this pod yet. Ask an admin to add you.", "error")
+            return redirect(url_for("login_page"))
         if data.get("discord_handle"):
             user.discord_handle = str(data["discord_handle"]).strip()[:100]
             db.session.commit()
@@ -393,166 +440,73 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         session["user_id"] = user.id
         return redirect(url_for("binder_view"))
 
-    @app.route("/auth/seed-demo-pod", methods=["POST"])
-    def seed_demo_pod():
-        """Seeds deterministic offline sample cards for local mobile UI exploration."""
-        if not dev_login_allowed():
-            return jsonify({"error": "Demo seeding disabled in production."}), 403
+    # -------------------------------------------------------------------------
+    # Admin User Management (Invite-Only Allowlist)
+    # -------------------------------------------------------------------------
 
-        jason = _upsert_google_user("dev-jason@vaultswap.local", "jason@vaultswap.local", "Jason", None)
-        if not jason.discord_handle:
-            jason.discord_handle = "@jason_mtg"
-        alex = _upsert_google_user("dev-alex@vaultswap.local", "alex@vaultswap.local", "Alex", None)
-        if not alex.discord_handle:
-            alex.discord_handle = "@alex_edh"
+    _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-        sample_cards = [
-            {
-                "scryfall_id": "11111111-1111-4111-8111-111111111101",
-                "oracle_id": "aaaaaaa1-1111-4111-8111-111111111101",
-                "name": "Rhystic Study",
-                "set_code": "WOT",
-                "set_name": "Wilds of Eldraine: Enchanting Tales",
-                "collector_number": "25",
-                "image_uri_normal": "https://cards.scryfall.io/normal/front/d/6/d6914dba-0d27-4055-ac34-b3ebf5802221.jpg",
-                "image_uri_small": "https://cards.scryfall.io/small/front/d/6/d6914dba-0d27-4055-ac34-b3ebf5802221.jpg",
-                "mana_cost": "{2}{U}",
-                "type_line": "Enchantment",
-                "usd_price": 42.50,
-                "usd_foil_price": 68.00,
-            },
-            {
-                "scryfall_id": "11111111-1111-4111-8111-111111111102",
-                "oracle_id": "aaaaaaa1-1111-4111-8111-111111111101",
-                "name": "Rhystic Study",
-                "set_code": "PRY",
-                "set_name": "Prophecy",
-                "collector_number": "45",
-                "image_uri_normal": "https://cards.scryfall.io/normal/front/d/6/d6914dba-0d27-4055-ac34-b3ebf5802221.jpg",
-                "image_uri_small": "https://cards.scryfall.io/small/front/d/6/d6914dba-0d27-4055-ac34-b3ebf5802221.jpg",
-                "mana_cost": "{2}{U}",
-                "type_line": "Enchantment",
-                "usd_price": 44.00,
-                "usd_foil_price": 190.00,
-            },
-            {
-                "scryfall_id": "11111111-1111-4111-8111-111111111103",
-                "oracle_id": "aaaaaaa2-1111-4111-8111-111111111102",
-                "name": "Sol Ring",
-                "set_code": "CMM",
-                "set_name": "Commander Masters",
-                "collector_number": "410",
-                "image_uri_normal": "https://cards.scryfall.io/normal/front/e/e/ee6e5a35-fe21-4dee-b0ef-a8f2841511ad.jpg",
-                "image_uri_small": "https://cards.scryfall.io/small/front/e/e/ee6e5a35-fe21-4dee-b0ef-a8f2841511ad.jpg",
-                "mana_cost": "{1}",
-                "type_line": "Artifact",
-                "usd_price": 1.85,
-                "usd_foil_price": 4.20,
-            },
-            {
-                "scryfall_id": "11111111-1111-4111-8111-111111111104",
-                "oracle_id": "aaaaaaa3-1111-4111-8111-111111111103",
-                "name": "The One Ring",
-                "set_code": "LTR",
-                "set_name": "The Lord of the Rings: Tales of Middle-earth",
-                "collector_number": "246",
-                "image_uri_normal": "https://cards.scryfall.io/normal/front/d/5/d5806e68-1054-458e-866d-1f2470f682b2.jpg",
-                "image_uri_small": "https://cards.scryfall.io/small/front/d/5/d5806e68-1054-458e-866d-1f2470f682b2.jpg",
-                "mana_cost": "{4}",
-                "type_line": "Legendary Artifact",
-                "usd_price": 69.00,
-                "usd_foil_price": 88.00,
-            },
-            {
-                "scryfall_id": "11111111-1111-4111-8111-111111111105",
-                "oracle_id": "aaaaaaa4-1111-4111-8111-111111111104",
-                "name": "Cyclonic Rift",
-                "set_code": "RVR",
-                "set_name": "Ravnica Remastered",
-                "collector_number": "40",
-                "image_uri_normal": "https://cards.scryfall.io/normal/front/d/f/dfb7c4b9-f2f4-4d4e-baf2-86551c8150fe.jpg",
-                "image_uri_small": "https://cards.scryfall.io/small/front/d/f/dfb7c4b9-f2f4-4d4e-baf2-86551c8150fe.jpg",
-                "mana_cost": "{1}{U}",
-                "type_line": "Instant",
-                "usd_price": 31.25,
-                "usd_foil_price": 41.00,
-            },
-        ]
+    @app.route("/admin/users", methods=["GET", "POST"])
+    @admin_required
+    def admin_users():
+        if request.method == "POST":
+            raw_email = (request.form.get("email") or "").strip().lower()
+            display_name = (request.form.get("display_name") or "").strip()
+            make_admin = str(request.form.get("is_admin") or "").strip().lower() in ("1", "true", "on", "yes")
 
-        for sc in sample_cards:
-            if not db.session.get(Card, sc["scryfall_id"]):
-                db.session.add(Card(**sc))
-        db.session.flush()
+            if not raw_email or not _EMAIL_RE.match(raw_email):
+                flash("Please enter a valid email address.", "error")
+                return redirect(url_for("admin_users"))
 
-        now = utc_now()
-        if BinderItem.query.filter_by(user_id=jason.id).count() == 0:
-            db.session.add_all([
-                BinderItem(
-                    user_id=jason.id,
-                    scryfall_id="11111111-1111-4111-8111-111111111101",
-                    quantity=2,
-                    finish="nonfoil",
-                    condition="NM",
-                    status="for_trade",
-                    mm_in_stock=True,
-                    mm_retail_price=44.99,
-                    mm_buylist_cash=24.00,
-                    mm_buylist_credit=31.20,
-                    mm_checked_at=now,
-                ),
-                BinderItem(
-                    user_id=jason.id,
-                    scryfall_id="11111111-1111-4111-8111-111111111102",
-                    quantity=1,
-                    finish="nonfoil",
-                    condition="LP",
-                    status="private",
-                ),
-                BinderItem(
-                    user_id=jason.id,
-                    scryfall_id="11111111-1111-4111-8111-111111111103",
-                    quantity=3,
-                    finish="foil",
-                    condition="NM",
-                    status="private",
-                ),
-            ])
+            existing = User.query.filter(func.lower(User.email) == raw_email).first()
+            if existing is not None:
+                flash(f"{raw_email} is already in the pod.", "error")
+                return redirect(url_for("admin_users"))
 
-        if BinderItem.query.filter_by(user_id=alex.id).count() == 0:
-            db.session.add_all([
-                BinderItem(
-                    user_id=alex.id,
-                    scryfall_id="11111111-1111-4111-8111-111111111104",
-                    quantity=1,
-                    finish="nonfoil",
-                    condition="NM",
-                    status="meeple_bound",
-                    mm_in_stock=False,
-                    mm_retail_price=72.99,
-                    mm_buylist_cash=42.00,
-                    mm_buylist_credit=54.60,
-                    mm_checked_at=now,
-                ),
-                BinderItem(
-                    user_id=alex.id,
-                    scryfall_id="11111111-1111-4111-8111-111111111105",
-                    quantity=1,
-                    finish="foil",
-                    condition="NM",
-                    status="for_trade",
-                    mm_in_stock=True,
-                    mm_retail_price=39.99,
-                    mm_buylist_cash=20.00,
-                    mm_buylist_credit=26.00,
-                    mm_checked_at=now,
-                ),
-            ])
+            new_user = User(
+                google_sub=f"invite:{raw_email}",
+                email=raw_email,
+                display_name=(display_name[:100] if display_name else raw_email.split("@")[0]),
+                is_admin=make_admin,
+            )
+            db.session.add(new_user)
+            db.session.commit()
+            flash(f"Invited {raw_email} to VaultSwap.", "success")
+            return redirect(url_for("admin_users"))
 
+        users = User.query.order_by(User.created_at.desc(), User.id.desc()).all()
+        card_counts = dict(
+            db.session.query(BinderItem.user_id, func.coalesce(func.sum(BinderItem.quantity), 0))
+            .group_by(BinderItem.user_id)
+            .all()
+        )
+        return render_template(
+            "admin_users.html",
+            users=users,
+            card_counts=card_counts,
+            active_tab="admin",
+        )
+
+    @app.route("/admin/users/<int:user_id>/revoke", methods=["POST"])
+    @admin_required
+    def admin_revoke_user(user_id: int):
+        me = get_current_user()
+        target = db.session.get(User, user_id)
+        if target is None:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_users"))
+        if me and target.id == me.id:
+            flash("You cannot revoke your own account.", "error")
+            return redirect(url_for("admin_users"))
+        if not target.is_pending:
+            flash("Only pending invites can be revoked.", "error")
+            return redirect(url_for("admin_users"))
+
+        email = target.email
+        db.session.delete(target)
         db.session.commit()
-        session.permanent = True
-        session["user_id"] = jason.id
-        flash("Demo pod seeded and signed in as Jason.", "success")
-        return redirect(url_for("binder_view"))
+        flash(f"Revoked pending invite for {email}.", "success")
+        return redirect(url_for("admin_users"))
 
     @app.route("/profile", methods=["POST"])
     @login_required
@@ -874,12 +828,37 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     # Import / Add (Zero Mighty Meeple Traffic — Scryfall Batch Only)
     # -------------------------------------------------------------------------
 
+    def _drive_import_context(user_id: int) -> Dict[str, Any]:
+        client_id = app.config.get("GOOGLE_CLIENT_ID", "")
+        api_key = app.config.get("GOOGLE_API_KEY", "")
+        project_num = app.config.get("GOOGLE_CLOUD_PROJECT_NUMBER", "")
+        last_drive_import = (
+            DriveImport.query.filter_by(user_id=user_id)
+            .filter(DriveImport.status.in_(["done", "unchanged"]))
+            .order_by(DriveImport.created_at.desc(), DriveImport.id.desc())
+            .first()
+        )
+        active_drive_import = (
+            DriveImport.query.filter_by(user_id=user_id)
+            .filter(DriveImport.status.in_(["queued", "running"]))
+            .order_by(DriveImport.id.desc())
+            .first()
+        )
+        return {
+            "drive_configured": bool(client_id and api_key and project_num),
+            "google_client_id": client_id,
+            "google_api_key": api_key,
+            "google_project_number": project_num,
+            "last_drive_import": last_drive_import,
+            "active_drive_import": active_drive_import,
+        }
+
     @app.route("/import", methods=["GET", "POST"])
     @login_required
     def import_cards():
         user = get_current_user()
         if request.method == "GET":
-            return render_template("import.html", active_tab="import")
+            return render_template("import.html", active_tab="import", **_drive_import_context(user.id))
 
         csv_text = None
         uploaded_file = request.files.get("csv_file")
@@ -902,7 +881,15 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             parsed = services.parse_import_input(csv_text=csv_text, quick_text=quick_text)
         except services.ImportParseError as exc:
             flash(str(exc), "error")
-            return render_template("import.html", active_tab="import", quick_text=quick_text), 400
+            return (
+                render_template(
+                    "import.html",
+                    active_tab="import",
+                    quick_text=quick_text,
+                    **_drive_import_context(user.id),
+                ),
+                400,
+            )
 
         if single_cond:
             for entry in parsed["entries"]:
@@ -919,6 +906,106 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         flash(msg, "success" if result["imported_rows"] > 0 else "error")
         return redirect(url_for("binder_view"))
+
+    def _parse_unresolved(imp: DriveImport) -> List[str]:
+        try:
+            data = json.loads(imp.unresolved or "[]")
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    @app.route("/import/drive", methods=["POST"])
+    @login_required
+    def import_from_drive():
+        user = get_current_user()
+        payload = request.get_json(silent=True) or request.form or {}
+        access_token = str(payload.get("access_token") or "").strip()
+        reuse_last = str(payload.get("reuse_last") or "").strip().lower() in ("1", "true", "yes")
+        file_id = str(payload.get("file_id") or "").strip()
+        file_name = str(payload.get("file_name") or "").strip()
+
+        active = (
+            DriveImport.query.filter_by(user_id=user.id)
+            .filter(DriveImport.status.in_(["queued", "running"]))
+            .first()
+        )
+        if active is not None:
+            return jsonify({"error": "A Google Drive import is already in progress."}), 409
+
+        if reuse_last and not file_id:
+            last = (
+                DriveImport.query.filter_by(user_id=user.id)
+                .filter(DriveImport.status.in_(["done", "unchanged"]))
+                .order_by(DriveImport.created_at.desc(), DriveImport.id.desc())
+                .first()
+            )
+            if last is None:
+                return jsonify({"error": "No previous Drive file found to re-sync."}), 400
+            file_id = last.drive_file_id
+            file_name = last.file_name
+
+        if not file_id:
+            return jsonify({"error": "Missing Google Drive file ID."}), 400
+
+        try:
+            DriveClient().verify_token(access_token, app.config.get("GOOGLE_CLIENT_ID", ""))
+        except DriveSyncError as exc:
+            return jsonify({"error": str(exc)}), 401
+
+        imp = DriveImport(
+            user_id=user.id,
+            drive_file_id=file_id[:128],
+            file_name=(file_name or "Drive CSV")[:255],
+            status="queued",
+            phase="downloading",
+        )
+        db.session.add(imp)
+        db.session.commit()
+
+        drive_worker.enqueue(imp.id, access_token)
+        return render_template(
+            "partials/drive_import_status.html",
+            imp=imp,
+            unresolved_list=[],
+        )
+
+    @app.route("/import/drive/<int:import_id>/status", methods=["GET"])
+    @login_required
+    def drive_import_status(import_id: int):
+        user = get_current_user()
+        imp = DriveImport.query.filter_by(id=import_id, user_id=user.id).first_or_404()
+        return render_template(
+            "partials/drive_import_status.html",
+            imp=imp,
+            unresolved_list=_parse_unresolved(imp),
+        )
+
+    @app.route("/import/drive/history", methods=["GET"])
+    @login_required
+    def drive_import_history():
+        user = get_current_user()
+        imports = (
+            DriveImport.query.filter_by(user_id=user.id)
+            .order_by(DriveImport.created_at.desc(), DriveImport.id.desc())
+            .limit(10)
+            .all()
+        )
+        return jsonify({
+            "imports": [
+                {
+                    "id": imp.id,
+                    "file_name": imp.file_name,
+                    "status": imp.status,
+                    "max_card_created_at": imp.max_card_created_at.isoformat() if imp.max_card_created_at else None,
+                    "rows_scanned": imp.rows_scanned,
+                    "rows_new": imp.rows_new,
+                    "rows_imported": imp.rows_imported,
+                    "cards_imported": imp.cards_imported,
+                    "created_at": imp.created_at.isoformat() if imp.created_at else None,
+                }
+                for imp in imports
+            ]
+        })
 
     @app.route("/api/scryfall/autocomplete", methods=["GET"])
     @login_required

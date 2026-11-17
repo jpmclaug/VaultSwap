@@ -25,6 +25,7 @@ def app():
         "GOOGLE_CLIENT_ID": "",
         "GOOGLE_CLIENT_SECRET": "",
         "DEV_LOGIN_ENABLED": True,
+        "INVITE_ONLY": False,
         "MEEPLE_CACHE_TTL_HOURS": 24.0,
         "MEEPLE_RATE_LIMIT_MIN_SEC": 1.5,
         "MEEPLE_RATE_LIMIT_MAX_SEC": 2.0,
@@ -620,3 +621,361 @@ def test_neon_env_vars_resolution(monkeypatch):
         assert "connect_args" not in psycopg2_opts
     finally:
         importlib.reload(config)
+
+
+def test_demo_seed_removed(client):
+    resp = client.post("/auth/seed-demo-pod")
+    assert resp.status_code == 404
+
+    login_html = client.get("/login").get_data(as_text=True)
+    assert "Demo Pod" not in login_html
+    assert "seed-demo-pod" not in login_html
+
+
+def test_invite_only_login(app, client):
+    app.config["INVITE_ONLY"] = True
+    app.config["ADMIN_EMAILS"] = {"jpmclaug@gmail.com"}
+
+    # 1. Unknown email is turned away with no user row created
+    resp = client.post("/auth/dev-login", data={"email": "stranger@example.com"}, follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+    assert User.query.filter_by(email="stranger@example.com").first() is None
+
+    # 2. Pre-invited pending user can sign in and placeholder google_sub is replaced
+    with app.app_context():
+        invited = User(
+            google_sub="invite:friend@example.com",
+            email="friend@example.com",
+            display_name="Friend",
+            is_admin=False,
+        )
+        db.session.add(invited)
+        db.session.commit()
+        assert invited.is_pending is True
+
+    resp2 = client.post("/auth/dev-login", data={"email": "friend@example.com"}, follow_redirects=False)
+    assert resp2.status_code == 302
+    assert "/binder" in resp2.headers["Location"] or resp2.headers["Location"].endswith("/")
+    friend = User.query.filter_by(email="friend@example.com").one()
+    assert friend.google_sub == "dev-friend@example.com"
+    assert friend.is_pending is False
+    assert friend.is_admin is False
+
+    # 3. Bootstrap admin in ADMIN_EMAILS gets in and becomes is_admin=True
+    client.get("/logout")
+    resp3 = client.post("/auth/dev-login", data={"email": "jpmclaug@gmail.com"}, follow_redirects=False)
+    assert resp3.status_code == 302
+    admin = User.query.filter_by(email="jpmclaug@gmail.com").one()
+    assert admin.is_admin is True
+
+
+def test_admin_users_page_access_and_add(app, client):
+    app.config["INVITE_ONLY"] = True
+    app.config["ADMIN_EMAILS"] = {"jpmclaug@gmail.com"}
+
+    # Pre-invite a non-admin user and sign them in
+    with app.app_context():
+        db.session.add(User(google_sub="invite:member@pod.local", email="member@pod.local", display_name="Member"))
+        db.session.commit()
+
+    _login_user(client, "member@pod.local", "Member")
+    non_admin_get = client.get("/admin/users")
+    assert non_admin_get.status_code == 302
+    non_admin_post = client.post("/admin/users", data={"email": "x@y.com"}, content_type="application/x-www-form-urlencoded")
+    assert non_admin_post.status_code == 302
+    assert User.query.filter_by(email="x@y.com").first() is None
+
+    # Switch to admin
+    client.get("/logout")
+    admin = _login_user(client, "jpmclaug@gmail.com", "Admin")
+
+    # Admin GET lists users
+    page_html = client.get("/admin/users").get_data(as_text=True)
+    assert "member@pod.local" in page_html
+    assert "jpmclaug@gmail.com" in page_html
+
+    # Admin POST creates a pending user
+    add_resp = client.post("/admin/users", data={"email": "NewFriend@Gmail.com", "display_name": "New Friend"})
+    assert add_resp.status_code == 302
+    new_u = User.query.filter_by(email="newfriend@gmail.com").one()
+    assert new_u.is_pending is True
+    assert new_u.is_admin is False
+
+    # Duplicate email (different case) is rejected
+    client.post("/admin/users", data={"email": "NEWFRIEND@gmail.com", "display_name": "Dup"})
+    assert User.query.filter_by(email="newfriend@gmail.com").count() == 1
+
+    # Cannot revoke active user or self
+    member = User.query.filter_by(email="member@pod.local").one()
+    client.post(f"/admin/users/{member.id}/revoke")
+    assert db.session.get(User, member.id) is not None
+    client.post(f"/admin/users/{admin.id}/revoke")
+    assert db.session.get(User, admin.id) is not None
+
+    # Can revoke pending invite
+    client.post(f"/admin/users/{new_u.id}/revoke")
+    assert db.session.get(User, new_u.id) is None
+
+
+def test_parse_card_date_formats():
+    from datetime import timezone
+    from drive_sync import parse_card_date
+
+    dt_iso = parse_card_date("2026-11-10T14:30:00Z")
+    assert dt_iso is not None and dt_iso.tzinfo == timezone.utc and dt_iso.year == 2026 and dt_iso.hour == 14
+
+    dt_offset = parse_card_date("2026-11-10T10:30:00-04:00")
+    assert dt_offset == dt_iso
+
+    dt_date = parse_card_date("2026-11-10")
+    assert dt_date is not None and dt_date.hour == 0 and dt_date.day == 10
+
+    dt_us = parse_card_date("11/10/2026 09:15")
+    assert dt_us is not None and dt_us.month == 11 and dt_us.minute == 15
+
+    dt_epoch_s = parse_card_date("1700000000")
+    assert dt_epoch_s is not None and dt_epoch_s.year == 2023
+
+    dt_epoch_ms = parse_card_date("1700000000000")
+    assert dt_epoch_ms == dt_epoch_s
+
+    assert parse_card_date("not-a-date") is None
+    assert parse_card_date("") is None
+
+
+def test_drive_incremental_import(app, client):
+    from contextlib import contextmanager
+    from drive_sync import run_drive_import
+    from models import DriveImport
+
+    user = _login_user(client, "drive@pod.local", "DriveUser")
+    c1 = _make_card("Sol Ring", "CMM", "410")
+    c2 = _make_card("Rhystic Study", "WOT", "25")
+    c3 = _make_card("Cyclonic Rift", "RVR", "40")
+
+    csv_v1 = (
+        "Name,Set code,Collector number,Quantity,Foil,Condition,Date added\n"
+        "Sol Ring,CMM,410,1,normal,NM,2026-11-01\n"
+        "Rhystic Study,WOT,25,2,normal,NM,2026-11-05\n"
+    )
+    csv_v2 = (
+        "Name,Set code,Collector number,Quantity,Foil,Condition,Date added\n"
+        "Sol Ring,CMM,410,1,normal,NM,2026-11-01\n"
+        "Rhystic Study,WOT,25,2,normal,NM,2026-11-05\n"
+        "Cyclonic Rift,RVR,40,1,foil,NM,2026-11-05\n"  # same-day tie at watermark!
+    )
+
+    class FakeDriveClient:
+        def __init__(self, meta, body):
+            self.meta = meta
+            self.body = body
+            self.stream_opened = False
+
+        def get_metadata(self, file_id, access_token):
+            return self.meta
+
+        @contextmanager
+        def open_csv_stream(self, file_id, mime_type, access_token):
+            self.stream_opened = True
+            yield io.StringIO(self.body)
+
+    # Run 1: imports both rows, saves file name + watermark
+    imp1 = DriveImport(user_id=user.id, drive_file_id="file-1", file_name="ManaBox_Nov1.csv")
+    db.session.add(imp1)
+    db.session.commit()
+    fc1 = FakeDriveClient({"id": "file-1", "name": "ManaBox_Nov1.csv", "mimeType": "text/csv", "md5Checksum": "md5-1", "size": 200}, csv_v1)
+    run_drive_import(imp1.id, "tok", drive_client=fc1)
+
+    db.session.refresh(imp1)
+    assert imp1.status == "done"
+    assert imp1.file_name == "ManaBox_Nov1.csv"
+    assert imp1.rows_imported == 2
+    assert imp1.cards_imported == 3
+    assert imp1.max_card_created_at.strftime("%Y-%m-%d") == "2026-11-05"
+    assert fc1.stream_opened is True
+
+    # Run 2: same md5 -> unchanged, stream never opened
+    imp2 = DriveImport(user_id=user.id, drive_file_id="file-1", file_name="ManaBox_Nov1.csv")
+    db.session.add(imp2)
+    db.session.commit()
+    fc2 = FakeDriveClient({"id": "file-1", "name": "ManaBox_Nov1.csv", "mimeType": "text/csv", "md5Checksum": "md5-1", "size": 200}, csv_v1)
+    run_drive_import(imp2.id, "tok", drive_client=fc2)
+
+    db.session.refresh(imp2)
+    assert imp2.status == "unchanged"
+    assert fc2.stream_opened is False
+
+    # Run 3: new file with extra row on the SAME date (tie-break via boundary_fingerprints)
+    imp3 = DriveImport(user_id=user.id, drive_file_id="file-2", file_name="ManaBox_Nov5.csv")
+    db.session.add(imp3)
+    db.session.commit()
+    fc3 = FakeDriveClient({"id": "file-2", "name": "ManaBox_Nov5.csv", "mimeType": "text/csv", "md5Checksum": "md5-2", "size": 300}, csv_v2)
+    run_drive_import(imp3.id, "tok", drive_client=fc3)
+
+    db.session.refresh(imp3)
+    assert imp3.status == "done"
+    assert imp3.rows_new == 1
+    assert imp3.cards_imported == 1
+
+    # Existing quantities unchanged; new card added
+    assert BinderItem.query.filter_by(user_id=user.id, scryfall_id=c1.scryfall_id).one().quantity == 1
+    assert BinderItem.query.filter_by(user_id=user.id, scryfall_id=c2.scryfall_id).one().quantity == 2
+    assert BinderItem.query.filter_by(user_id=user.id, scryfall_id=c3.scryfall_id).one().quantity == 1
+
+
+def test_drive_import_resumes_after_chunk_failure(app, client):
+    from contextlib import contextmanager
+    from drive_sync import run_drive_import
+    from models import DriveImport
+
+    app.config["DRIVE_IMPORT_CHUNK_ROWS"] = 2
+    user = _login_user(client, "resume@pod.local", "ResumeUser")
+    _make_card("Card A", "CMM", "1")
+    _make_card("Card B", "CMM", "2")
+    # Card C and D are NOT in local DB so Scryfall is called on chunk 2
+
+    csv_body = (
+        "Name,Set code,Collector number,Quantity,Date added\n"
+        "Card A,CMM,1,1,2026-11-01\n"
+        "Card B,CMM,2,1,2026-11-02\n"
+        "Card C,CMM,3,1,2026-11-03\n"
+        "Card D,CMM,4,1,2026-11-04\n"
+    )
+
+    class FakeDriveClient:
+        def get_metadata(self, file_id, access_token):
+            return {"id": file_id, "name": "Big.csv", "mimeType": "text/csv", "md5Checksum": "md5-big", "size": 300}
+
+        @contextmanager
+        def open_csv_stream(self, file_id, mime_type, access_token):
+            yield io.StringIO(csv_body)
+
+    failing_sf = MagicMock()
+    failing_sf.resolve_collection_batch.side_effect = RuntimeError("Scryfall 503")
+
+    imp1 = DriveImport(user_id=user.id, drive_file_id="f-big", file_name="Big.csv")
+    db.session.add(imp1)
+    db.session.commit()
+    run_drive_import(imp1.id, "tok", drive_client=FakeDriveClient(), scryfall_provider=failing_sf)
+
+    db.session.refresh(imp1)
+    assert imp1.status == "failed"
+    assert imp1.rows_imported == 2
+    assert imp1.max_card_created_at.strftime("%Y-%m-%d") == "2026-11-02"
+
+    # Re-run with working Scryfall: resumes from 2026-11-02, no duplicates on A or B
+    ok_sf = MagicMock()
+    ok_sf.resolve_collection_batch.return_value = (
+        {
+            0: {
+                "scryfall_id": str(uuid.uuid4()),
+                "oracle_id": str(uuid.uuid4()),
+                "name": "Card C",
+                "set_code": "CMM",
+                "collector_number": "3",
+            },
+            1: {
+                "scryfall_id": str(uuid.uuid4()),
+                "oracle_id": str(uuid.uuid4()),
+                "name": "Card D",
+                "set_code": "CMM",
+                "collector_number": "4",
+            },
+        },
+        [],
+    )
+    imp2 = DriveImport(user_id=user.id, drive_file_id="f-big", file_name="Big.csv")
+    db.session.add(imp2)
+    db.session.commit()
+    run_drive_import(imp2.id, "tok", drive_client=FakeDriveClient(), scryfall_provider=ok_sf)
+
+    db.session.refresh(imp2)
+    assert imp2.status == "done"
+    assert imp2.rows_new == 2
+    assert imp2.cards_imported == 2
+    assert BinderItem.query.filter_by(user_id=user.id).count() == 4
+
+
+def test_drive_import_missing_date_column(app, client):
+    from contextlib import contextmanager
+    from drive_sync import run_drive_import
+    from models import DriveImport
+
+    user = _login_user(client, "nodate@pod.local", "NoDate")
+
+    class FakeDriveClient:
+        def get_metadata(self, file_id, access_token):
+            return {"id": file_id, "name": "NoDate.csv", "mimeType": "text/csv", "md5Checksum": "md5-nd", "size": 100}
+
+        @contextmanager
+        def open_csv_stream(self, file_id, mime_type, access_token):
+            yield io.StringIO("Name,Set code,Collector number\nSol Ring,CMM,410\n")
+
+    imp = DriveImport(user_id=user.id, drive_file_id="f-nd", file_name="NoDate.csv")
+    db.session.add(imp)
+    db.session.commit()
+    run_drive_import(imp.id, "tok", drive_client=FakeDriveClient())
+
+    db.session.refresh(imp)
+    assert imp.status == "failed"
+    assert "No created-date column found" in imp.error
+    assert "Set code" in imp.error
+
+
+def test_bulk_import_query_count(app, client):
+    from sqlalchemy import event
+
+    user = _login_user(client, "bulk@pod.local", "BulkUser")
+    entries = []
+    for i in range(300):
+        c = _make_card(f"Bulk Card {i}", "TST", str(i + 1))
+        entries.append({
+            "name": c.name,
+            "set_code": "TST",
+            "collector_number": str(i + 1),
+            "scryfall_id": c.scryfall_id,
+            "quantity": 1,
+            "finish": "nonfoil",
+            "condition": "NM",
+        })
+
+    select_count = 0
+
+    def count_selects(conn, cursor, statement, parameters, context, executemany):
+        nonlocal select_count
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_count += 1
+
+    event.listen(db.engine, "before_cursor_execute", count_selects)
+    try:
+        res = services.import_cards_to_binder(user.id, entries)
+    finally:
+        event.remove(db.engine, "before_cursor_execute", count_selects)
+
+    assert res["imported_rows"] == 300
+    assert select_count <= 10
+
+
+def test_drive_routes_scoping(app, client):
+    from models import DriveImport
+
+    app.config["GOOGLE_CLIENT_ID"] = "expected-client-id"
+    alice = _login_user(client, "alice_drv@pod.local", "Alice")
+    imp = DriveImport(user_id=alice.id, drive_file_id="f1", file_name="Alice.csv", status="done")
+    db.session.add(imp)
+    db.session.commit()
+
+    # Token aud mismatch is rejected
+    bad_tok_resp = MagicMock(status_code=200)
+    bad_tok_resp.json.return_value = {"aud": "other-app-client-id"}
+    with patch("drive_sync.requests.Session.get", return_value=bad_tok_resp):
+        r = client.post("/import/drive", json={"file_id": "f1", "access_token": "bad-tok"})
+        assert r.status_code == 401
+
+    # Bob cannot read Alice's DriveImport status
+    _login_user(client, "bob_drv@pod.local", "Bob")
+    assert client.get(f"/import/drive/{imp.id}/status").status_code == 404
+    hist = client.get("/import/drive/history").get_json()
+    assert hist["imports"] == []
+

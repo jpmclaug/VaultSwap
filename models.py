@@ -47,6 +47,7 @@ class User(db.Model):
     display_name = db.Column(String(100), nullable=False)
     avatar_url = db.Column(Text, nullable=True)
     discord_handle = db.Column(String(100), nullable=True)
+    is_admin = db.Column(Boolean, nullable=False, default=False, server_default=text("false"))
     created_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     binder_items = db.relationship(
@@ -55,6 +56,17 @@ class User(db.Model):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    drive_imports = db.relationship(
+        "DriveImport",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    @property
+    def is_pending(self) -> bool:
+        """True if user was invited by an admin and has not signed in yet."""
+        return (self.google_sub or "").startswith("invite:")
 
     @property
     def handle_label(self) -> str:
@@ -163,3 +175,40 @@ class BinderItem(db.Model):
 
     def __repr__(self) -> str:
         return f"<BinderItem id={self.id} user={self.user_id} status={self.status!r}>"
+
+
+class DriveImport(db.Model):
+    """Tracks each Google Drive CSV import run, its file metadata, and incremental watermark."""
+
+    __tablename__ = "drive_imports"
+
+    id = db.Column(Integer, primary_key=True)
+    user_id = db.Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    drive_file_id = db.Column(String(128), nullable=False)
+    file_name = db.Column(String(255), nullable=False)
+    mime_type = db.Column(String(100), nullable=True)
+    drive_md5 = db.Column(String(64), nullable=True)
+    drive_modified_time = db.Column(DateTime(timezone=True), nullable=True)
+    date_column = db.Column(String(100), nullable=True)
+    max_card_created_at = db.Column(DateTime(timezone=True), nullable=True)
+    boundary_fingerprints = db.Column(Text, nullable=True)  # JSON list of hashes at max_card_created_at
+    status = db.Column(String(20), nullable=False, default="queued")  # queued | running | done | unchanged | failed
+    phase = db.Column(String(40), nullable=True)  # downloading | resolving | importing
+    rows_scanned = db.Column(Integer, nullable=False, default=0)
+    rows_new = db.Column(Integer, nullable=False, default=0)
+    rows_imported = db.Column(Integer, nullable=False, default=0)
+    cards_imported = db.Column(Integer, nullable=False, default=0)
+    rows_skipped_no_date = db.Column(Integer, nullable=False, default=0)
+    unresolved = db.Column(Text, nullable=True)  # JSON list capped at 200 names
+    error = db.Column(Text, nullable=True)
+    created_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    finished_at = db.Column(DateTime(timezone=True), nullable=True)
+
+    user = db.relationship("User", back_populates="drive_imports")
+
+    __table_args__ = (
+        Index("idx_drive_imports_user_watermark", "user_id", desc("max_card_created_at")),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DriveImport id={self.id} user={self.user_id} file={self.file_name!r} status={self.status!r}>"

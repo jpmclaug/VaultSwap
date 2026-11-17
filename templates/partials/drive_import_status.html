@@ -1,0 +1,55 @@
+<div id="drive-import-status"
+     {% if imp.status in ('queued', 'running') %}
+     hx-get="{{ url_for('drive_import_status', import_id=imp.id) }}"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {% endif %}
+     class="rounded-xl p-3.5 border text-xs space-y-1.5
+     {% if imp.status == 'failed' %}bg-rose-950/50 border-rose-800/80 text-rose-200
+     {% elif imp.status in ('done', 'unchanged') %}bg-emerald-950/40 border-emerald-800/70 text-emerald-200
+     {% else %}bg-slate-950 border-sky-500/40 text-slate-200{% endif %}">
+
+    <div class="flex items-center justify-between gap-2">
+        <span class="font-bold truncate">{{ imp.file_name }}</span>
+        <span class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full shrink-0
+            {% if imp.status == 'failed' %}bg-rose-500/20 text-rose-200
+            {% elif imp.status == 'unchanged' %}bg-slate-800 text-emerald-300
+            {% elif imp.status == 'done' %}bg-emerald-500/20 text-emerald-300
+            {% else %}bg-sky-500/20 text-sky-300 animate-pulse{% endif %}">
+            {{ imp.phase or imp.status }}
+        </span>
+    </div>
+
+    {% if imp.status in ('queued', 'running') %}
+    <div class="text-[11px] text-slate-400">
+        {% if imp.rows_scanned %}
+        Scanned {{ imp.rows_scanned }} rows · {{ imp.rows_new }} new · {{ imp.cards_imported }} cards added
+        {% else %}
+        Streaming from Google Drive…
+        {% endif %}
+    </div>
+    {% elif imp.status == 'unchanged' %}
+    <div class="text-[11px] text-emerald-300/90">
+        No changes since last sync (file checksum unchanged). Nothing downloaded.
+    </div>
+    {% elif imp.status == 'done' %}
+    <div class="text-[11px] text-emerald-200/90">
+        Added <span class="font-bold text-white">{{ imp.cards_imported }}</span> card(s)
+        across <span class="font-bold text-white">{{ imp.rows_imported }}</span> new row(s)
+        (scanned {{ imp.rows_scanned }} total).
+        {% if imp.max_card_created_at %}
+        Newest card date: <span class="font-mono text-emerald-300">{{ imp.max_card_created_at.strftime('%Y-%m-%d %H:%M') }}</span>.
+        {% endif %}
+    </div>
+    {% if imp.rows_skipped_no_date %}
+    <div class="text-[10px] text-amber-300">Skipped {{ imp.rows_skipped_no_date }} row(s) without a valid date.</div>
+    {% endif %}
+    {% if unresolved_list %}
+    <div class="text-[10px] text-amber-300">
+        Unmatched on Scryfall ({{ unresolved_list|length }}): {{ unresolved_list[:5]|join(', ') }}{% if unresolved_list|length > 5 %}…{% endif %}
+    </div>
+    {% endif %}
+    {% elif imp.status == 'failed' %}
+    <div class="text-[11px] text-rose-200">{{ imp.error or 'Drive import failed.' }}</div>
+    {% endif %}
+</div>

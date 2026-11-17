@@ -34,6 +34,16 @@
 
             {% if current_user %}
             <div class="flex items-center gap-2">
+                {% if current_user.is_admin %}
+                <a href="{{ url_for('admin_users') }}"
+                   class="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border {% if active_tab == 'admin' %}border-amber-500/60 text-amber-300{% else %}border-slate-800 text-slate-300{% endif %} rounded-full px-2.5 py-1 text-xs font-semibold transition"
+                   title="Admin: Manage Users">
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                    </svg>
+                    <span>Admin</span>
+                </a>
+                {% endif %}
                 <button type="button" onclick="document.getElementById('profile-modal').classList.remove('hidden')"
                     class="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-full pl-1.5 pr-3 py-1 transition">
                     {% if current_user.avatar_url %}
@@ -105,6 +115,12 @@
                         class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
                 </div>
                 <div class="text-[11px] text-slate-400">Signed in as <span class="text-slate-200">{{ current_user.email }}</span></div>
+                {% if current_user.is_admin %}
+                <a href="{{ url_for('admin_users') }}"
+                   class="block w-full text-center py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-semibold transition">
+                    Admin · Manage Users
+                </a>
+                {% endif %}
                 <div class="flex items-center gap-2 pt-1">
                     <button type="submit" class="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs py-2.5 rounded-xl transition">
                         Save Profile

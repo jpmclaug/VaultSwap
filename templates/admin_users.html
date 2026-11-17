@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Admin · Pod Users // VaultSwap{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-lg font-extrabold text-white tracking-tight">Pod Users</h1>
+            <p class="text-xs text-slate-400">VaultSwap is invite-only. Add Google emails below to grant access.</p>
+        </div>
+        <span class="text-[11px] font-semibold bg-slate-900 border border-slate-800 text-slate-300 px-2.5 py-1 rounded-full">
+            {{ users|length }} total
+        </span>
+    </div>
+
+    <!-- Add User Form -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+        <h2 class="text-sm font-bold text-white">Add User</h2>
+        <form action="{{ url_for('admin_users') }}" method="POST" class="space-y-3">
+            <div>
+                <label class="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Google Email</label>
+                <input type="email" name="email" required placeholder="friend@gmail.com"
+                       class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500">
+            </div>
+            <div>
+                <label class="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Display Name (Optional)</label>
+                <input type="text" name="display_name" placeholder="e.g. Alex"
+                       class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500">
+            </div>
+            <label class="flex items-center gap-2.5 text-xs text-slate-300 cursor-pointer select-none">
+                <input type="checkbox" name="is_admin" value="1"
+                       class="w-4 h-4 rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500">
+                <span>Make admin (can add &amp; manage pod users)</span>
+            </label>
+            <button type="submit"
+                    class="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 rounded-xl transition">
+                Invite User
+            </button>
+        </form>
+    </section>
+
+    <!-- User List -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl divide-y divide-slate-800/80 overflow-hidden">
+        {% for u in users %}
+        <div class="p-3.5 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 min-w-0">
+                {% if u.avatar_url %}
+                <img src="{{ u.avatar_url }}" alt="{{ u.display_name }}" class="w-9 h-9 rounded-full object-cover shrink-0">
+                {% else %}
+                <span class="w-9 h-9 rounded-full bg-emerald-500/15 text-emerald-300 text-sm font-bold flex items-center justify-center shrink-0">
+                    {{ (u.display_name or u.email or 'U')[0]|upper }}
+                </span>
+                {% endif %}
+                <div class="min-w-0">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="text-sm font-semibold text-white truncate">{{ u.display_name }}</span>
+                        {% if u.is_admin %}
+                        <span class="text-[10px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded-md">Admin</span>
+                        {% endif %}
+                        {% if u.is_pending %}
+                        <span class="text-[10px] font-bold uppercase tracking-wider bg-slate-800 text-amber-300 border border-slate-700 px-1.5 py-0.5 rounded-md">Pending</span>
+                        {% else %}
+                        <span class="text-[10px] font-bold uppercase tracking-wider bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded-md">Active</span>
+                        {% endif %}
+                    </div>
+                    <div class="text-xs text-slate-400 truncate">{{ u.email }}</div>
+                    <div class="text-[10px] text-slate-500 mt-0.5">
+                        {{ card_counts.get(u.id, 0) }} cards · Joined {{ u.created_at.strftime('%Y-%m-%d') if u.created_at else '' }}
+                    </div>
+                </div>
+            </div>
+
+            {% if u.is_pending and u.id != current_user.id %}
+            <form action="{{ url_for('admin_revoke_user', user_id=u.id) }}" method="POST" class="shrink-0">
+                <button type="submit"
+                        class="px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 border border-rose-800/70 text-rose-200 text-xs font-semibold transition">
+                    Revoke
+                </button>
+            </form>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </section>
+</div>
+{% endblock %}

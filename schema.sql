@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name VARCHAR(100) NOT NULL,
     avatar_url TEXT,
     discord_handle VARCHAR(100),
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -56,3 +57,31 @@ CREATE TABLE IF NOT EXISTS binder_items (
 
 CREATE INDEX IF NOT EXISTS idx_binder_user_recent ON binder_items(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_binder_pod_feed ON binder_items(status, updated_at DESC) WHERE status != 'private';
+
+-- 4. Google Drive Incremental Imports
+CREATE TABLE IF NOT EXISTS drive_imports (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    drive_file_id VARCHAR(128) NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(100),
+    drive_md5 VARCHAR(64),
+    drive_modified_time TIMESTAMPTZ,
+    date_column VARCHAR(100),
+    max_card_created_at TIMESTAMPTZ,
+    boundary_fingerprints TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'queued',
+    phase VARCHAR(40),
+    rows_scanned INTEGER NOT NULL DEFAULT 0,
+    rows_new INTEGER NOT NULL DEFAULT 0,
+    rows_imported INTEGER NOT NULL DEFAULT 0,
+    cards_imported INTEGER NOT NULL DEFAULT 0,
+    rows_skipped_no_date INTEGER NOT NULL DEFAULT 0,
+    unresolved TEXT,
+    error TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_drive_imports_user_id ON drive_imports(user_id);
+CREATE INDEX IF NOT EXISTS idx_drive_imports_user_watermark ON drive_imports(user_id, max_card_created_at DESC);

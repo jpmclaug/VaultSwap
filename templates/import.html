@@ -96,10 +96,63 @@
             </button>
         </form>
     </section>
+
+    <!-- 4. Sync from Google Drive (Incremental) -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+        <div>
+            <h2 class="text-sm font-bold text-white">Sync from Google Drive</h2>
+            <p class="text-[11px] text-slate-400">
+                Pick a large ManaBox <code class="text-slate-300">.csv</code> (or Google Sheet up to 10 MB).
+                Saves the file name &amp; newest card date so future syncs only add newer cards.
+            </p>
+        </div>
+
+        {% if last_drive_import %}
+        <div class="text-[11px] text-slate-300 bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-2">
+            Last sync: <span class="font-semibold text-white">{{ last_drive_import.file_name }}</span>
+            {% if last_drive_import.max_card_created_at %}
+            · newest card <span class="font-mono text-emerald-300">{{ last_drive_import.max_card_created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            {% endif %}
+            · {{ last_drive_import.cards_imported }} cards
+        </div>
+        {% endif %}
+
+        {% if drive_configured %}
+        <div class="flex flex-col sm:flex-row gap-2">
+            <button type="button" id="drive-pick-btn"
+                    class="flex-1 bg-indigo-500 hover:bg-indigo-400 text-slate-950 font-bold text-sm py-2.5 px-4 rounded-xl transition">
+                Choose file from Drive
+            </button>
+            {% if last_drive_import %}
+            <button type="button" id="drive-resync-btn"
+                    class="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm py-2.5 px-4 rounded-xl border border-slate-700 transition truncate">
+                Re-sync {{ last_drive_import.file_name }}
+            </button>
+            {% endif %}
+        </div>
+        {% else %}
+        <div class="rounded-xl bg-slate-950 border border-slate-800 p-3 text-xs text-slate-400">
+            <span class="text-amber-400 font-semibold block mb-0.5">Google Drive Not Configured</span>
+            Set <code class="text-slate-200">GOOGLE_CLIENT_ID</code>, <code class="text-slate-200">GOOGLE_API_KEY</code>, and <code class="text-slate-200">GOOGLE_CLOUD_PROJECT_NUMBER</code> in <code class="text-slate-200">.env</code> to enable Drive sync.
+        </div>
+        {% endif %}
+
+        <div id="drive-status-container">
+            {% if active_drive_import %}
+            {% with imp=active_drive_import, unresolved_list=[] %}
+            {% include "partials/drive_import_status.html" %}
+            {% endwith %}
+            {% endif %}
+        </div>
+    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
+{% if drive_configured %}
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://apis.google.com/js/api.js" async defer></script>
+{% endif %}
 <script>
     const inputEl = document.getElementById('single-card-input');
     const resultsEl = document.getElementById('autocomplete-results');
@@ -145,5 +198,109 @@
             }
         });
     }
+
+    {% if drive_configured %}
+    (function () {
+        const CLIENT_ID = {{ google_client_id|tojson }};
+        const API_KEY = {{ google_api_key|tojson }};
+        const APP_ID = {{ google_project_number|tojson }};
+        const LOGIN_HINT = {{ current_user.email|tojson }};
+        const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+        const statusContainer = document.getElementById('drive-status-container');
+        const pickBtn = document.getElementById('drive-pick-btn');
+        const resyncBtn = document.getElementById('drive-resync-btn');
+
+        let pickerApiLoaded = false;
+        let tokenClient = null;
+
+        function ensurePickerLoaded() {
+            return new Promise((resolve, reject) => {
+                if (pickerApiLoaded && window.google && window.google.picker) return resolve();
+                if (!window.gapi) return reject(new Error('Google API script not loaded yet. Please try again.'));
+                window.gapi.load('picker', {
+                    callback: () => { pickerApiLoaded = true; resolve(); },
+                    onerror: () => reject(new Error('Failed to load Google Picker.'))
+                });
+            });
+        }
+
+        function requestDriveToken(silent) {
+            return new Promise((resolve, reject) => {
+                if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+                    return reject(new Error('Google Identity script not loaded yet. Please try again.'));
+                }
+                tokenClient = window.google.accounts.oauth2.initTokenClient({
+                    client_id: CLIENT_ID,
+                    scope: SCOPE,
+                    hint: LOGIN_HINT,
+                    callback: (resp) => {
+                        if (resp && resp.access_token) resolve(resp.access_token);
+                        else reject(new Error(resp?.error_description || resp?.error || 'Authorization cancelled.'));
+                    },
+                    error_callback: (err) => reject(new Error(err?.message || 'Google auth popup blocked or closed.'))
+                });
+                tokenClient.requestAccessToken({ prompt: silent ? '' : 'consent' });
+            });
+        }
+
+        async function startServerImport(payload) {
+            const resp = await fetch('{{ url_for("import_from_drive") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const text = await resp.text();
+            if (!resp.ok) {
+                let errMsg = 'Failed to start Drive import.';
+                try { errMsg = JSON.parse(text).error || errMsg; } catch (_) {}
+                statusContainer.innerHTML = `<div class="rounded-xl p-3 border bg-rose-950/50 border-rose-800/80 text-rose-200 text-xs">${errMsg}</div>`;
+                return;
+            }
+            statusContainer.innerHTML = text;
+            if (window.htmx) window.htmx.process(statusContainer);
+        }
+
+        if (pickBtn) {
+            pickBtn.addEventListener('click', async () => {
+                try {
+                    const [token] = await Promise.all([requestDriveToken(false), ensurePickerLoaded()]);
+                    const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+                        .setMimeTypes('text/csv,application/vnd.ms-excel,text/plain,application/vnd.google-apps.spreadsheet');
+                    const picker = new google.picker.PickerBuilder()
+                        .addView(view)
+                        .setOAuthToken(token)
+                        .setDeveloperKey(API_KEY)
+                        .setAppId(APP_ID)
+                        .setCallback((data) => {
+                            if (data.action === google.picker.Action.PICKED && data.docs && data.docs.length) {
+                                const doc = data.docs[0];
+                                startServerImport({ file_id: doc.id, file_name: doc.name, access_token: token });
+                            }
+                        })
+                        .build();
+                    picker.setVisible(true);
+                } catch (err) {
+                    statusContainer.innerHTML = `<div class="rounded-xl p-3 border bg-rose-950/50 border-rose-800/80 text-rose-200 text-xs">${err.message}</div>`;
+                }
+            });
+        }
+
+        if (resyncBtn) {
+            resyncBtn.addEventListener('click', async () => {
+                try {
+                    let token;
+                    try {
+                        token = await requestDriveToken(true);
+                    } catch (_) {
+                        token = await requestDriveToken(false);
+                    }
+                    await startServerImport({ reuse_last: true, access_token: token });
+                } catch (err) {
+                    statusContainer.innerHTML = `<div class="rounded-xl p-3 border bg-rose-950/50 border-rose-800/80 text-rose-200 text-xs">${err.message}</div>`;
+                }
+            });
+        }
+    })();
+    {% endif %}
 </script>
 {% endblock %}

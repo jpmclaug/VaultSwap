@@ -14,6 +14,8 @@
   - **On-Tag Snapshots**: Mighty Meeple's retail stock/price and buylist cash/credit quotes are fetched *only* when a card is tagged for trade/buylist.
   - **24-Hour Pod Cache Sharing**: If any pod member tagged the same printing within 24 hours, the cached quote is reused instantly with zero external HTTP traffic.
   - **Sequential Rate-Limit Worker**: Bulk status changes queue live Mighty Meeple requests sequentially with polite 1.5s–2.0s jittered delays.
+- **Admin Invite-Only Access**: Admins manage the pod allowlist at `/admin/users` (bootstrapped via `ADMIN_EMAILS`).
+- **Incremental Google Drive Sync**: Pick large ManaBox CSVs from Google Drive via Google Picker (`drive.file` scope). Streams rows without loading the file into memory, skips unchanged files by MD5 checksum, and tracks each user's newest card created date so subsequent syncs only add newly created cards.
 - **Cross-Printing Duplicate Spotting**: Groups by `oracle_id` across different sets (e.g. 3 copies of *Rhystic Study* across 3 printings) so you can easily spot tradeable extras.
 - **Pod Feed Prioritization**: Shared pod cards are ordered with **Meeple Bound** first, ensuring friends see cards before they leave the playgroup forever.
 
@@ -57,6 +59,14 @@ APP_BASE_URL=
 
 # Set false in production
 DEV_LOGIN_ENABLED=true
+
+# Admin & Invite-Only Access Control
+ADMIN_EMAILS=jpmclaug@gmail.com
+INVITE_ONLY=true
+
+# Google Drive Picker (optional; requires Drive API & Picker API enabled in GCP)
+GOOGLE_API_KEY=
+GOOGLE_CLOUD_PROJECT_NUMBER=
 ```
 
 ### 3. Run Locally
@@ -84,7 +94,7 @@ Run the full pytest suite:
 pytest -v
 ```
 
-All 9 tests verify row-level scoping, 75-card Scryfall collection batching, zero Mighty Meeple traffic on import, 24-hour pod cache sharing, sequential rate-limit guard, and duplicate filtering.
+All 18 tests verify row-level scoping, 75-card Scryfall collection batching, zero Mighty Meeple traffic on import, 24-hour pod cache sharing, sequential rate-limit guard, duplicate filtering, invite-only admin access, demo removal, and incremental Google Drive streaming imports.
 
 ---
 
