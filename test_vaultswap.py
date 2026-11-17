@@ -1445,6 +1445,32 @@ def test_mcp_traders_and_summary_and_resources(app, client):
     anyio.run(_check_mcp_registry)
 
 
+def test_unified_asgi_app_routing_and_mcp_endpoint(app, client):
+    from starlette.testclient import TestClient
+    import asgi
+
+    with TestClient(asgi.asgi_app) as tc:
+        # Flask web UI route still functions normally
+        res_flask = tc.get("/login")
+        assert res_flask.status_code == 200
+
+        # MCP Streamable HTTP endpoint handles MCP JSON-RPC initialize handshake
+        init_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "GeminiMobileApp", "version": "1.0"},
+            },
+        }
+        res_mcp = tc.post("/mcp", json=init_payload)
+        assert res_mcp.status_code == 200
+        assert "capabilities" in res_mcp.text
+
+
+
 def test_buylist_tradein_first_and_lightly_played_condition(app, client):
     """Verifies buylist displays trade-in/credit first then cash, and always marks card as lightly played."""
     with app.app_context():

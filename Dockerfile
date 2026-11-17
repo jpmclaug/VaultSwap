@@ -19,6 +19,5 @@ COPY . .
 
 EXPOSE 8080
 
-# Single Gunicorn worker with 8 threads keeps the in-process Mighty Meeple rate-limited
-# queue sequential and lightweight for Cloud Run.
-CMD exec gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 8 --timeout 0 "app:create_app()"
+# Run unified ASGI server (serves Flask Web UI + /mcp Streamable HTTP on port 8080)
+CMD exec uvicorn asgi:asgi_app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --timeout-keep-alive 65
