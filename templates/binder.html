@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+
+{% block title %}My Binder // VaultSwap{% endblock %}
+
+{% block content %}
+<div class="space-y-3">
+    <!-- Compact Binder Telemetry Strip -->
+    <div class="grid grid-cols-3 gap-2">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-2.5">
+            <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Binder Cards</div>
+            <div class="text-base font-extrabold text-white mt-0.5">{{ stats.total_cards }}</div>
+            <div class="text-[10px] text-slate-400">${{ '%.2f'|format(stats.total_market_value) }} Scryfall</div>
+        </div>
+        <div class="bg-slate-900 border border-emerald-500/20 rounded-2xl p-2.5">
+            <div class="text-[10px] uppercase tracking-wider text-emerald-400 font-semibold">For Trade</div>
+            <div class="text-base font-extrabold text-white mt-0.5">{{ stats.for_trade_qty }}</div>
+            <div class="text-[10px] text-slate-400">Visible to pod</div>
+        </div>
+        <div class="bg-slate-900 border border-amber-500/20 rounded-2xl p-2.5">
+            <div class="text-[10px] uppercase tracking-wider text-amber-400 font-semibold">Meeple Queue</div>
+            <div class="text-base font-extrabold text-white mt-0.5">{{ stats.meeple_qty }}</div>
+            <div class="text-[10px] text-amber-300/90">${{ '%.2f'|format(stats.meeple_credit_total) }} Cr</div>
+        </div>
+    </div>
+
+    <!-- Horizontal Scroll Quick Filter Pills -->
+    <div class="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+        {% set filters = [
+            ('all', 'All'),
+            ('recent', 'Recent Adds'),
+            ('dupes', 'Dupes (2+)'),
+            ('for_trade', 'For Trade'),
+            ('meeple_bound', 'Meeple Queue')
+        ] %}
+        {% for f_key, f_label in filters %}
+        <a href="{{ url_for('binder_view', filter=f_key, q=search_q) }}"
+           class="shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold border transition
+           {% if active_filter == f_key %}
+               {% if f_key == 'meeple_bound' %}bg-amber-400 text-slate-950 border-amber-300
+               {% elif f_key == 'for_trade' %}bg-emerald-500 text-slate-950 border-emerald-400
+               {% else %}bg-white text-slate-950 border-white{% endif %}
+           {% else %}
+               bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700
+           {% endif %}">
+            {{ f_label }}
+        </a>
+        {% endfor %}
+    </div>
+
+    <!-- Search & Bulk Tag Toggle Row -->
+    <div class="flex items-center gap-2">
+        <div class="relative flex-1">
+            <svg class="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input type="search"
+                   name="q"
+                   value="{{ search_q }}"
+                   placeholder="Search card name, set, or type..."
+                   hx-get="{{ url_for('binder_view') }}"
+                   hx-trigger="keyup changed delay:250ms, search"
+                   hx-target="#binder-list"
+                   hx-swap="outerHTML"
+                   hx-vals='{"filter": "{{ active_filter }}"}'
+                   class="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500">
+        </div>
+        <button type="button" id="bulk-toggle-btn" onclick="toggleBulkMode()"
+                class="shrink-0 px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs font-bold text-slate-300 transition">
+            Bulk Tag
+        </button>
+    </div>
+
+    <!-- Collapsible Bulk Status Bar -->
+    <form id="bulk-status-form" action="{{ url_for('bulk_update_status') }}" method="POST"
+          class="hidden bg-slate-900 border border-slate-700 rounded-2xl p-3 space-y-2.5 shadow-xl">
+        <input type="hidden" name="filter" value="{{ active_filter }}">
+        <input type="hidden" name="q" value="{{ search_q }}">
+        <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-slate-200">Bulk Tag Selected Cards</span>
+            <button type="button" onclick="selectAllVisible()" class="text-emerald-400 font-semibold hover:underline">
+                Select Visible
+            </button>
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+            <button type="submit" name="status" value="private"
+                    class="py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold transition">
+                Set Private
+            </button>
+            <button type="submit" name="status" value="for_trade"
+                    class="py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold transition">
+                Set Trade
+            </button>
+            <button type="submit" name="status" value="meeple_bound"
+                    class="py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold transition">
+                Set Meeple
+            </button>
+        </div>
+    </form>
+
+    <!-- Private Binder Card Rows -->
+    {% include "partials/binder_list.html" %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let bulkModeActive = false;
+
+    function applyBulkCheckboxVisibility() {
+        document.querySelectorAll('.bulk-checkbox-wrap').forEach(el => {
+            el.classList.toggle('hidden', !bulkModeActive);
+        });
+    }
+
+    function toggleBulkMode() {
+        bulkModeActive = !bulkModeActive;
+        const form = document.getElementById('bulk-status-form');
+        const btn = document.getElementById('bulk-toggle-btn');
+        form.classList.toggle('hidden', !bulkModeActive);
+        btn.classList.toggle('border-emerald-500', bulkModeActive);
+        btn.classList.toggle('text-emerald-300', bulkModeActive);
+        applyBulkCheckboxVisibility();
+    }
+
+    function selectAllVisible() {
+        const boxes = document.querySelectorAll('input[name="item_ids"]');
+        const allChecked = Array.from(boxes).every(b => b.checked);
+        boxes.forEach(b => { b.checked = !allChecked; });
+    }
+
+    document.body.addEventListener('htmx:afterSwap', function () {
+        if (bulkModeActive) {
+            applyBulkCheckboxVisibility();
+        }
+    });
+</script>
+{% endblock %}

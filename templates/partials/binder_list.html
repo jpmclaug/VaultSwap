@@ -1,0 +1,32 @@
+<div id="binder-list" class="space-y-2.5">
+    {% if items %}
+        {% for item in items %}
+            {% with is_pending=is_pending_fn(item.id) %}
+                {% include "partials/binder_card_row.html" %}
+            {% endwith %}
+        {% endfor %}
+    {% else %}
+        <div class="bg-slate-900/60 border border-dashed border-slate-800 rounded-2xl p-8 text-center space-y-3">
+            <div class="text-sm font-bold text-slate-200">
+                {% if active_filter == 'all' and not search_q %}
+                Your private binder is empty
+                {% else %}
+                No cards match this filter
+                {% endif %}
+            </div>
+            <p class="text-xs text-slate-400">
+                {% if active_filter == 'all' and not search_q %}
+                Import a ManaBox CSV or paste a quick list to start tagging cards for your pod.
+                {% else %}
+                Try switching filter pills or clearing your search query.
+                {% endif %}
+            </p>
+            {% if active_filter == 'all' and not search_q %}
+            <a href="{{ url_for('import_cards') }}"
+               class="inline-flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-4 py-2.5 rounded-xl transition">
+                Import / Add Cards
+            </a>
+            {% endif %}
+        </div>
+    {% endif %}
+</div>

@@ -1,0 +1,160 @@
+{% set card = item.card %}
+{% set dupe_info = oracle_dupe_map.get(card.oracle_id|string, {}) %}
+{% set total_oracle_qty = dupe_info.get('total_qty', item.quantity) %}
+{% set oracle_printings = dupe_info.get('printings', 1) %}
+{% set market_price = item.market_price %}
+{% set is_row_pending = is_pending if is_pending is defined else false %}
+
+<div id="binder-row-{{ item.id }}"
+     class="bg-slate-900/95 border rounded-2xl p-3 transition shadow-sm
+     {% if item.status == 'meeple_bound' %}border-amber-500/40
+     {% elif item.status == 'for_trade' %}border-emerald-500/40
+     {% else %}border-slate-800{% endif %}"
+     {% if is_row_pending %}
+     hx-get="{{ url_for('get_item_row', item_id=item.id) }}"
+     hx-trigger="every 2s"
+     hx-target="#binder-row-{{ item.id }}"
+     hx-swap="outerHTML"
+     {% endif %}>
+
+    <div class="flex gap-3 items-start">
+        <!-- Bulk Select Checkbox (shown when bulk select mode is toggled) -->
+        <label class="bulk-checkbox-wrap hidden pt-1 shrink-0 cursor-pointer">
+            <input type="checkbox" name="item_ids" value="{{ item.id }}" form="bulk-status-form"
+                   class="w-4 h-4 rounded border-slate-600 bg-slate-950 text-emerald-500 focus:ring-emerald-500">
+        </label>
+
+        <!-- Card Thumbnail -->
+        <button type="button"
+                onclick="openCardPreview('{{ card.image_uri_normal or card.image_uri_small or '' }}', '{{ card.name|e }} ({{ card.set_code }})')"
+                class="w-12 h-16 rounded-lg overflow-hidden bg-slate-800 border border-slate-700/80 shrink-0 focus:outline-none">
+            {% if card.image_uri_small or card.image_uri_normal %}
+            <img src="{{ card.image_uri_small or card.image_uri_normal }}" alt="{{ card.name }}"
+                 loading="lazy" class="w-full h-full object-cover">
+            {% else %}
+            <div class="w-full h-full flex items-center justify-center text-[10px] font-bold text-slate-500">MTG</div>
+            {% endif %}
+        </button>
+
+        <!-- Card Details & Actions -->
+        <div class="flex-1 min-w-0">
+            <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0">
+                    <h3 class="text-sm font-bold text-white truncate leading-snug">{{ card.name }}</h3>
+                    <div class="flex flex-wrap items-center gap-1.5 mt-1">
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-bold uppercase text-slate-300 tracking-wide">
+                            {{ card.set_code }} #{{ card.collector_number }}
+                        </span>
+                        {% if item.finish != 'nonfoil' %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase
+                            {% if item.finish == 'etched' %}bg-purple-500/20 text-purple-300 border border-purple-500/30
+                            {% else %}bg-sky-500/20 text-sky-300 border border-sky-500/30{% endif %}">
+                            {{ item.finish }}
+                        </span>
+                        {% endif %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-800/70 text-[10px] font-semibold text-slate-400">
+                            {{ item.condition or 'NM' }}
+                        </span>
+                        {% if total_oracle_qty > 1 %}
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/30 text-[10px] font-semibold text-indigo-300">
+                            {{ total_oracle_qty }}x owned{% if oracle_printings > 1 %} ({{ oracle_printings }} sets){% endif %}
+                        </span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Scryfall Market Price + Qty Controls -->
+                <div class="text-right shrink-0">
+                    <div class="text-sm font-extrabold text-white">
+                        {% if market_price is not none %}
+                        ${{ '%.2f'|format(market_price) }}
+                        {% else %}
+                        <span class="text-slate-500 text-xs">--</span>
+                        {% endif %}
+                    </div>
+                    <div class="inline-flex items-center gap-1 mt-1 bg-slate-950 border border-slate-800 rounded-lg px-1 py-0.5">
+                        <button type="button"
+                                hx-post="{{ url_for('update_item_quantity', item_id=item.id) }}"
+                                hx-vals='{"delta": -1}'
+                                hx-target="#binder-row-{{ item.id }}"
+                                hx-swap="outerHTML"
+                                class="w-5 h-5 flex items-center justify-center text-slate-400 hover:text-white text-xs font-bold rounded">-</button>
+                        <span class="text-xs font-bold text-slate-200 px-1">{{ item.quantity }}x</span>
+                        <button type="button"
+                                hx-post="{{ url_for('update_item_quantity', item_id=item.id) }}"
+                                hx-vals='{"delta": 1}'
+                                hx-target="#binder-row-{{ item.id }}"
+                                hx-swap="outerHTML"
+                                class="w-5 h-5 flex items-center justify-center text-slate-400 hover:text-white text-xs font-bold rounded">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3-State Segmented Pill Toggle (Private | Trade | Meeple) -->
+            <div class="mt-2.5 grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800/90">
+                <button type="button"
+                        hx-post="{{ url_for('update_item_status', item_id=item.id) }}"
+                        hx-vals='{"status": "private"}'
+                        hx-target="#binder-row-{{ item.id }}"
+                        hx-swap="outerHTML"
+                        class="py-1.5 rounded-lg text-[11px] font-bold transition text-center
+                        {% if item.status == 'private' %}bg-slate-700 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">
+                    Private
+                </button>
+                <button type="button"
+                        hx-post="{{ url_for('update_item_status', item_id=item.id) }}"
+                        hx-vals='{"status": "for_trade"}'
+                        hx-target="#binder-row-{{ item.id }}"
+                        hx-swap="outerHTML"
+                        class="py-1.5 rounded-lg text-[11px] font-bold transition text-center
+                        {% if item.status == 'for_trade' %}bg-emerald-500 text-slate-950 shadow{% else %}text-slate-400 hover:text-emerald-300{% endif %}">
+                    Trade
+                </button>
+                <button type="button"
+                        hx-post="{{ url_for('update_item_status', item_id=item.id) }}"
+                        hx-vals='{"status": "meeple_bound"}'
+                        hx-target="#binder-row-{{ item.id }}"
+                        hx-swap="outerHTML"
+                        class="py-1.5 rounded-lg text-[11px] font-bold transition text-center
+                        {% if item.status == 'meeple_bound' %}bg-amber-400 text-slate-950 shadow{% else %}text-slate-400 hover:text-amber-300{% endif %}">
+                    Meeple
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Mighty Meeple Point-in-Time Snapshot Sub-Bar -->
+    {% if is_row_pending %}
+    <div class="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-amber-300">
+        <span class="flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+            Queued for polite Mighty Meeple check...
+        </span>
+    </div>
+    {% elif item.has_meeple_snapshot %}
+    <div class="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[11px]">
+        <div class="text-slate-300 truncate">
+            <span class="font-semibold {% if item.mm_in_stock %}text-emerald-400{% else %}text-slate-400{% endif %}">
+                Meeple: {{ 'In Stock' if item.mm_in_stock else 'Out of Stock' }}{% if item.mm_retail_price is not none %} (${{ '%.2f'|format(item.mm_retail_price) }}){% endif %}
+            </span>
+            <span class="text-slate-600 mx-1">&bull;</span>
+            <span class="text-amber-300 font-semibold">
+                Buylist:
+                {% if item.mm_buylist_cash is not none %}${{ '%.2f'|format(item.mm_buylist_cash) }} Cash{% else %}N/A{% endif %}
+                /
+                {% if item.mm_buylist_credit is not none %}${{ '%.2f'|format(item.mm_buylist_credit) }} Credit{% else %}N/A{% endif %}
+            </span>
+        </div>
+        <button type="button"
+                title="Refresh Mighty Meeple Snapshot"
+                hx-post="{{ url_for('refresh_item_meeple', item_id=item.id) }}"
+                hx-target="#binder-row-{{ item.id }}"
+                hx-swap="outerHTML"
+                class="shrink-0 p-1 rounded-lg text-slate-400 hover:text-amber-300 hover:bg-slate-800 transition">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+        </button>
+    </div>
+    {% endif %}
+</div>

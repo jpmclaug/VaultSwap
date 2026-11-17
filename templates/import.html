@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+
+{% block title %}Import / Add // VaultSwap{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+    <div class="bg-slate-900/90 border border-sky-500/25 rounded-2xl p-3.5 flex items-start gap-2.5">
+        <span class="w-2 h-2 rounded-full bg-sky-400 mt-1.5 shrink-0"></span>
+        <div class="text-xs text-slate-300 leading-relaxed">
+            <span class="font-bold text-white">Private by Default &amp; Light Touch:</span>
+            Imports only call Scryfall's <code class="text-sky-300">/cards/collection</code> batch API (up to 75 cards/request).
+            Mighty Meeple is never hit until you tap <span class="text-emerald-300 font-semibold">Trade</span> or <span class="text-amber-300 font-semibold">Meeple</span>.
+        </div>
+    </div>
+
+    <!-- 1. Quick Single Card Add with Scryfall Autocomplete -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+        <h2 class="text-sm font-bold text-white">Quick Card Add</h2>
+        <form action="{{ url_for('import_cards') }}" method="POST" class="space-y-3">
+            <div class="relative">
+                <input type="text" id="single-card-input" name="single_card_name" autocomplete="off"
+                       placeholder="Type card name (e.g. Rhystic Study)"
+                       class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-500">
+                <div id="autocomplete-results"
+                     class="hidden absolute left-0 right-0 top-full mt-1 bg-slate-900 border border-slate-700 rounded-xl overflow-hidden shadow-2xl z-20 max-h-48 overflow-y-auto">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-3 gap-2">
+                <div>
+                    <label class="block text-[10px] font-semibold uppercase text-slate-400 mb-1">Qty</label>
+                    <input type="number" name="single_quantity" value="1" min="1" max="99"
+                           class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-500">
+                </div>
+                <div>
+                    <label class="block text-[10px] font-semibold uppercase text-slate-400 mb-1">Finish</label>
+                    <select name="single_finish"
+                            class="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-2 text-sm text-white focus:outline-none focus:border-sky-500">
+                        <option value="nonfoil">Nonfoil</option>
+                        <option value="foil">Foil</option>
+                        <option value="etched">Etched</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-[10px] font-semibold uppercase text-slate-400 mb-1">Cond</label>
+                    <select name="single_condition"
+                            class="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-2 text-sm text-white focus:outline-none focus:border-sky-500">
+                        <option value="NM">NM</option>
+                        <option value="LP">LP</option>
+                        <option value="MP">MP</option>
+                        <option value="HP">HP</option>
+                    </select>
+                </div>
+            </div>
+
+            <button type="submit"
+                    class="w-full bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-sm py-2.5 rounded-xl transition">
+                Add to Private Binder
+            </button>
+        </form>
+    </section>
+
+    <!-- 2. Paste Quick List -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+        <div>
+            <h2 class="text-sm font-bold text-white">Paste Quick List</h2>
+            <p class="text-[11px] text-slate-400">One card per line — supports set codes and <code class="text-slate-300">*F*</code> markers</p>
+        </div>
+        <form action="{{ url_for('import_cards') }}" method="POST" class="space-y-3">
+            <textarea name="quick_text" rows="5"
+                      placeholder="1 Sol Ring&#10;2x Counterspell (CMM) 81&#10;1 Rhystic Study [WOT] 25 *F*"
+                      class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 font-mono focus:outline-none focus:border-emerald-500">{{ quick_text or '' }}</textarea>
+            <button type="submit"
+                    class="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm py-2.5 rounded-xl transition">
+                Import Pasted Cards
+            </button>
+        </form>
+    </section>
+
+    <!-- 3. Upload ManaBox CSV -->
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+        <div>
+            <h2 class="text-sm font-bold text-white">Upload ManaBox CSV</h2>
+            <p class="text-[11px] text-slate-400">Export directly from ManaBox on your phone and upload the <code class="text-slate-300">.csv</code></p>
+        </div>
+        <form action="{{ url_for('import_cards') }}" method="POST" enctype="multipart/form-data" class="space-y-3">
+            <label class="block border-2 border-dashed border-slate-700 hover:border-emerald-500/60 rounded-2xl p-5 text-center cursor-pointer transition bg-slate-950/60">
+                <input type="file" name="csv_file" accept=".csv,text/csv" required class="hidden"
+                       onchange="document.getElementById('csv-filename').textContent = this.files[0]?.name || 'Tap to choose ManaBox .csv'">
+                <div id="csv-filename" class="text-xs font-semibold text-slate-300">Tap to choose ManaBox .csv file</div>
+                <div class="text-[10px] text-slate-500 mt-1">Supports Scryfall ID, Set code, Collector number, Foil, Quantity, Condition</div>
+            </label>
+            <button type="submit"
+                    class="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold text-sm py-2.5 rounded-xl border border-slate-700 transition">
+                Upload &amp; Import CSV
+            </button>
+        </form>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const inputEl = document.getElementById('single-card-input');
+    const resultsEl = document.getElementById('autocomplete-results');
+    let debounceTimer = null;
+
+    if (inputEl && resultsEl) {
+        inputEl.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            const q = inputEl.value.trim();
+            if (q.length < 2) {
+                resultsEl.classList.add('hidden');
+                resultsEl.innerHTML = '';
+                return;
+            }
+            debounceTimer = setTimeout(async () => {
+                try {
+                    const resp = await fetch(`/api/scryfall/autocomplete?q=${encodeURIComponent(q)}`);
+                    const data = await resp.json();
+                    const items = data.suggestions || [];
+                    if (!items.length) {
+                        resultsEl.classList.add('hidden');
+                        return;
+                    }
+                    resultsEl.innerHTML = items.slice(0, 8).map(name =>
+                        `<button type="button" class="w-full text-left px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 border-b border-slate-800/70 last:border-0">${name.replace(/</g, '&lt;')}</button>`
+                    ).join('');
+                    resultsEl.querySelectorAll('button').forEach(btn => {
+                        btn.addEventListener('click', () => {
+                            inputEl.value = btn.textContent;
+                            resultsEl.classList.add('hidden');
+                        });
+                    });
+                    resultsEl.classList.remove('hidden');
+                } catch (e) {
+                    resultsEl.classList.add('hidden');
+                }
+            }, 220);
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!inputEl.contains(e.target) && !resultsEl.contains(e.target)) {
+                resultsEl.classList.add('hidden');
+            }
+        });
+    }
+</script>
+{% endblock %}

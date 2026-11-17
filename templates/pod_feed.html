@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Pod Feed // VaultSwap{% endblock %}
+
+{% block content %}
+<div class="space-y-3">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-base font-extrabold text-white">Pod Trade Feed</h1>
+            <p class="text-[11px] text-slate-400">Meeple Bound cards surface first before leaving the pod</p>
+        </div>
+        <span class="px-2.5 py-1 rounded-full bg-slate-900 border border-slate-800 text-[11px] font-bold text-slate-300">
+            {{ items|length }} listing{{ '' if items|length == 1 else 's' }}
+        </span>
+    </div>
+
+    <!-- Status Filter Pills -->
+    <div class="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+        <a href="{{ url_for('pod_feed', status='all', owner_id=selected_owner_id or '', q=search_q) }}"
+           class="shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold border transition
+           {% if status_filter == 'all' %}bg-white text-slate-950 border-white{% else %}bg-slate-900 text-slate-300 border-slate-800{% endif %}">
+            All Shared (Meeple First)
+        </a>
+        <a href="{{ url_for('pod_feed', status='meeple_bound', owner_id=selected_owner_id or '', q=search_q) }}"
+           class="shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold border transition
+           {% if status_filter == 'meeple_bound' %}bg-amber-400 text-slate-950 border-amber-300{% else %}bg-slate-900 text-slate-300 border-slate-800{% endif %}">
+            Meeple Bound
+        </a>
+        <a href="{{ url_for('pod_feed', status='for_trade', owner_id=selected_owner_id or '', q=search_q) }}"
+           class="shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold border transition
+           {% if status_filter == 'for_trade' %}bg-emerald-500 text-slate-950 border-emerald-400{% else %}bg-slate-900 text-slate-300 border-slate-800{% endif %}">
+            For Trade
+        </a>
+    </div>
+
+    <!-- Owner Filter Pills -->
+    {% if pod_owners %}
+    <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+        <a href="{{ url_for('pod_feed', status=status_filter, q=search_q) }}"
+           class="shrink-0 px-3 py-1 rounded-lg text-[11px] font-semibold border transition
+           {% if not selected_owner_id %}bg-slate-800 text-white border-slate-700{% else %}bg-slate-950 text-slate-400 border-slate-800{% endif %}">
+            Everyone
+        </a>
+        {% for owner in pod_owners %}
+        <a href="{{ url_for('pod_feed', status=status_filter, owner_id=owner.id, q=search_q) }}"
+           class="shrink-0 px-3 py-1 rounded-lg text-[11px] font-semibold border transition
+           {% if selected_owner_id == owner.id %}bg-slate-800 text-white border-slate-700{% else %}bg-slate-950 text-slate-400 border-slate-800{% endif %}">
+            {{ owner.handle_label }}
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Search Input -->
+    <div class="relative">
+        <svg class="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <input type="search"
+               name="q"
+               value="{{ search_q }}"
+               placeholder="Search pod trades by card, set, or friend..."
+               hx-get="{{ url_for('pod_feed') }}"
+               hx-trigger="keyup changed delay:250ms, search"
+               hx-target="#pod-feed-list"
+               hx-swap="outerHTML"
+               hx-vals='{"status": "{{ status_filter }}", "owner_id": "{{ selected_owner_id or "" }}"}'
+               class="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-400">
+    </div>
+
+    {% include "partials/pod_feed_list.html" %}
+</div>
+{% endblock %}

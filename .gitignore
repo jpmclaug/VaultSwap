@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+instance/
+.pytest_cache/
+
+# Local SQLite & Environment
+*.db
+*.sqlite
+*.sqlite3
+.env
+.vaultswap.pid
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
