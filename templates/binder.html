@@ -4,6 +4,20 @@
 
 {% block content %}
 <div class="space-y-3">
+    <!-- Home / Binder Branded Hero -->
+    <div class="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900/90 to-slate-950 border border-slate-800 p-3 sm:p-4 flex items-center gap-3.5 shadow-lg">
+        <img src="{{ url_for('static', filename='img/vaultswap-logo.jpg') }}" 
+             alt="VaultSwap Logo" 
+             class="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-cover border border-slate-700/80 shadow-md shrink-0">
+        <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+                <h1 class="text-base sm:text-lg font-bold text-white tracking-tight leading-snug">My Vault Binder</h1>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">Private</span>
+            </div>
+            <p class="text-xs text-slate-400 truncate mt-0.5">Manage your MTG collection, tag trades for your pod, and check Mighty Meeple quotes.</p>
+        </div>
+    </div>
+
     <!-- Compact Binder Telemetry Strip -->
     <div class="grid grid-cols-3 gap-2">
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-2.5">
