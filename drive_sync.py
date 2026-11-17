@@ -118,6 +118,37 @@ def compute_row_fingerprint(entry: Dict[str, Any], raw_date: str) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
+class _IterContentStream(io.RawIOBase):
+    """Adapts a `requests.Response.iter_content` iterator into a readable binary stream.
+
+    Avoids wrapping `urllib3.HTTPResponse` (`resp.raw`) directly in `io.TextIOWrapper`,
+    because `urllib3` closes `resp.raw` at EOF and subsequent `TextIOWrapper` reads raise
+    `ValueError: I/O operation on closed file.`.
+    """
+
+    def __init__(self, chunks: Iterator[bytes]):
+        self._chunks = iter(chunks)
+        self._buf = bytearray()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: bytearray | memoryview) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
+        while not self._buf:
+            try:
+                chunk = next(self._chunks)
+            except StopIteration:
+                return 0
+            if chunk:
+                self._buf.extend(chunk)
+        n = min(len(b), len(self._buf))
+        b[:n] = self._buf[:n]
+        del self._buf[:n]
+        return n
+
+
 class DriveClient:
     """Thin HTTP client for Google Drive v3 API and OAuth2 token verification."""
 
@@ -185,13 +216,16 @@ class DriveClient:
                         "Google Sheet export failed (Sheets exports are capped at 10 MB; upload as .csv for larger files)."
                     )
                 raise DriveSyncError(f"Failed to download Drive file ({resp.status_code}).")
-            resp.raw.decode_content = True
-            text_stream = io.TextIOWrapper(resp.raw, encoding="utf-8-sig", newline="", errors="replace")
+            buffered = io.BufferedReader(
+                _IterContentStream(resp.iter_content(chunk_size=65536)),
+                buffer_size=65536,
+            )
+            text_stream = io.TextIOWrapper(buffered, encoding="utf-8-sig", newline="", errors="replace")
             try:
                 yield text_stream
             finally:
                 try:
-                    text_stream.detach()
+                    text_stream.close()
                 except Exception:
                     pass
 

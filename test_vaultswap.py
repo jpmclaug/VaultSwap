@@ -990,3 +990,43 @@ def test_privacy_page_public(client):
     login_html = client.get("/login").get_data(as_text=True)
     assert "/privacy" in login_html
 
+
+def test_drive_client_open_csv_stream_handles_urllib3_eof():
+    import csv
+    import io
+    import requests
+    import urllib3
+    from drive_sync import DriveClient, scan_new_rows
+
+    csv_bytes = (
+        b"\xef\xbb\xbfName,Set code,Collector number,Quantity,Foil,Condition,Date added\r\n"
+        b"Sol Ring,CMM,410,1,normal,NM,2026-11-01\r\n"
+        b"\"Rhystic\nStudy\",WOT,25,2,foil,NM,2026-11-05\r\n"
+    )
+    raw = urllib3.HTTPResponse(
+        body=io.BytesIO(csv_bytes),
+        headers={"Content-Length": str(len(csv_bytes))},
+        preload_content=False,
+    )
+    resp = requests.Response()
+    resp.status_code = 200
+    resp.raw = raw
+
+    session = MagicMock(spec=requests.Session)
+    session.get.return_value = resp
+    client = DriveClient(session=session)
+
+    with client.open_csv_stream("file-1", "text/csv", "tok") as text_stream:
+        scan = scan_new_rows(
+            text_stream=text_stream,
+            watermark=None,
+            boundary_fps=[],
+            first_import=True,
+        )
+
+    assert scan.rows_scanned == 2
+    assert len(scan.new_entries) == 2
+    assert scan.new_entries[0][2]["name"] == "Sol Ring"
+    assert scan.new_entries[1][2]["name"] == "Rhystic\nStudy"
+
+
