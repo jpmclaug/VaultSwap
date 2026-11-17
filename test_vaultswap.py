@@ -979,3 +979,14 @@ def test_drive_routes_scoping(app, client):
     hist = client.get("/import/drive/history").get_json()
     assert hist["imports"] == []
 
+
+def test_privacy_page_public(client):
+    resp = client.get("/privacy")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Privacy Policy" in html
+    assert "drive.file" in html
+
+    login_html = client.get("/login").get_data(as_text=True)
+    assert "/privacy" in login_html
+

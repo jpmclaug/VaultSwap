@@ -301,6 +301,10 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             dev_login_allowed=dev_login_allowed(),
         )
 
+    @app.route("/privacy")
+    def privacy_policy():
+        return render_template("privacy.html")
+
     @app.route("/logout", methods=["GET", "POST"])
     def logout():
         session.clear()
