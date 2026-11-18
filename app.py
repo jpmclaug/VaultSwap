@@ -15,9 +15,11 @@ from flask import (
     flash,
     g,
     jsonify,
+    make_response,
     redirect,
     render_template,
     request,
+    send_from_directory,
     session,
     url_for,
 )
@@ -237,6 +239,10 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     meeple_worker.init_app(app)
     app.meeple_worker = meeple_worker  # type: ignore[attr-defined]
 
+    discord_worker = services.DiscordNotificationWorker()
+    discord_worker.init_app(app)
+    app.discord_worker = discord_worker  # type: ignore[attr-defined]
+
     drive_worker = DriveImportWorker()
     drive_worker.init_app(app)
     app.drive_worker = drive_worker  # type: ignore[attr-defined]
@@ -258,6 +264,9 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         if "is_admin" not in user_cols:
             with db.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE"))
+        if "discord_webhook_url" not in user_cols:
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN discord_webhook_url TEXT"))
         card_cols = {c["name"] for c in inspect(db.engine).get_columns("cards")}
         if "colors" not in card_cols:
             with db.engine.begin() as conn:
@@ -405,6 +414,38 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         db.session.commit()
         return user
+
+    @app.route("/manifest.webmanifest")
+    @app.route("/manifest.json")
+    def pwa_manifest():
+        """Serve Progressive Web App manifest with canonical MIME type."""
+        response = make_response(send_from_directory("static", "manifest.webmanifest"))
+        response.headers["Content-Type"] = "application/manifest+json; charset=utf-8"
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    @app.route("/sw.js")
+    def service_worker():
+        """Serve Service Worker from app root so default scope covers entire site."""
+        response = make_response(send_from_directory("static", "sw.js"))
+        response.headers["Content-Type"] = "application/javascript; charset=utf-8"
+        response.headers["Service-Worker-Allowed"] = "/"
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return response
+
+    @app.route("/offline")
+    def offline_page():
+        """Offline fallback page for Service Worker cache."""
+        return render_template("offline.html")
+
+    @app.route("/apple-touch-icon.png")
+    @app.route("/apple-touch-icon-precomposed.png")
+    def apple_touch_icon():
+        return send_from_directory("static/img/icons", "apple-touch-icon.png", mimetype="image/png")
+
+    @app.route("/favicon.ico")
+    def favicon():
+        return send_from_directory("static", "favicon.ico", mimetype="image/vnd.microsoft.icon")
 
     @app.route("/login")
     def login_page():
@@ -689,11 +730,63 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         user = get_current_user()
         display_name = (request.form.get("display_name") or "").strip()
         discord_handle = (request.form.get("discord_handle") or "").strip()
+        raw_webhook = request.form.get("discord_webhook_url")
+
         if display_name:
             user.display_name = display_name[:100]
         user.discord_handle = discord_handle[:100] or None
+
+        if raw_webhook is not None:
+            try:
+                user.discord_webhook_url = services.validate_discord_webhook_url(raw_webhook)
+            except ValueError as exc:
+                db.session.commit()
+                flash(str(exc), "error")
+                return redirect(request.referrer or url_for("binder_view"))
+
         db.session.commit()
         flash("Pod profile updated.", "success")
+        return redirect(request.referrer or url_for("binder_view"))
+
+    @app.route("/profile/test-webhook", methods=["POST"])
+    @login_required
+    def test_discord_webhook():
+        user = get_current_user()
+        raw_url = (request.form.get("discord_webhook_url") or user.discord_webhook_url or "").strip()
+        try:
+            webhook_url = services.validate_discord_webhook_url(raw_url)
+        except ValueError as exc:
+            if request.is_json:
+                return jsonify({"error": str(exc)}), 400
+            flash(str(exc), "error")
+            return redirect(request.referrer or url_for("binder_view"))
+
+        if not webhook_url:
+            msg = "Configure and save a Discord Webhook URL first."
+            if request.is_json:
+                return jsonify({"error": msg}), 400
+            flash(msg, "error")
+            return redirect(request.referrer or url_for("binder_view"))
+
+        payload = {
+            "username": "VaultSwap",
+            "content": (
+                f"✅ **VaultSwap Discord Webhook Connected!**\n"
+                f"Configured by **{user.display_name}** — new **For Trade** and **Meeple Bound** cards "
+                f"will be batched for 5 minutes and posted here."
+            ),
+        }
+        ok = discord_worker.sender_fn(webhook_url, payload)
+        if not ok:
+            err_msg = "Could not deliver test message to Discord webhook. Check the URL and channel permissions."
+            if request.is_json:
+                return jsonify({"error": err_msg}), 502
+            flash(err_msg, "error")
+            return redirect(request.referrer or url_for("binder_view"))
+
+        if request.is_json:
+            return jsonify({"ok": True})
+        flash("Test notification sent to your Discord webhook!", "success")
         return redirect(request.referrer or url_for("binder_view"))
 
     # -------------------------------------------------------------------------
@@ -755,6 +848,7 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             return jsonify({"error": f"Invalid status '{new_status}'."}), 400
 
         item = BinderItem.query.filter_by(id=item_id, user_id=user.id).first_or_404()
+        previous_status = item.status
         item.status = new_status
         if new_status == "meeple_bound":
             item.condition = "LP"
@@ -775,6 +869,8 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 services.apply_meeple_snapshot(item, mm_data)
 
         db.session.commit()
+        if new_status in ("for_trade", "meeple_bound") and previous_status != new_status:
+            discord_worker.enqueue([item.id])
         oracle_dupe_map = _compute_oracle_dupe_map(user.id)
         return render_template(
             "partials/binder_card_row.html",
@@ -910,12 +1006,16 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         now = utc_now()
         ttl = float(app.config.get("MEEPLE_CACHE_TTL_HOURS", 24.0))
         to_queue: List[int] = []
+        discord_to_queue: List[int] = []
 
         for item in items:
+            prev_status = item.status
             item.status = new_status
             if new_status == "meeple_bound":
                 item.condition = "LP"
             item.updated_at = now
+            if new_status in ("for_trade", "meeple_bound") and prev_status != new_status:
+                discord_to_queue.append(item.id)
             if new_status in ("for_trade", "meeple_bound") and item.mm_checked_at is None:
                 cached = services.find_cached_meeple_snapshot(
                     card_name=item.card.name,
@@ -932,6 +1032,8 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         db.session.commit()
 
         queued_count = meeple_worker.enqueue(to_queue) if to_queue else 0
+        if discord_to_queue:
+            discord_worker.enqueue(discord_to_queue)
 
         if request.is_json:
             return jsonify({"updated": len(items), "queued": queued_count})

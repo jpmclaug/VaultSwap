@@ -48,6 +48,7 @@ class User(db.Model):
     display_name = db.Column(String(100), nullable=False)
     avatar_url = db.Column(Text, nullable=True)
     discord_handle = db.Column(String(100), nullable=True)
+    discord_webhook_url = db.Column(Text, nullable=True)
     is_admin = db.Column(Boolean, nullable=False, default=False, server_default=text("false"))
     created_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False)
 

@@ -1,0 +1,80 @@
+{
+  "id": "/?source=pwa",
+  "name": "VaultSwap // MTG Pod Binder",
+  "short_name": "VaultSwap",
+  "description": "Private Pod MTG Binder, Trade Tracker, and Mighty Meeple Buylist Sync.",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui", "window-controls-overlay"],
+  "orientation": "portrait-primary",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["games", "utilities", "entertainment"],
+  "icons": [
+    {
+      "src": "/static/img/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/img/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/img/icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/static/img/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "My Binder",
+      "short_name": "Binder",
+      "description": "View and manage your MTG binder collection",
+      "url": "/binder?source=pwa",
+      "icons": [
+        {
+          "src": "/static/img/icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Pod Feed",
+      "short_name": "Feed",
+      "description": "Browse pod trade opportunities and cards",
+      "url": "/feed?source=pwa",
+      "icons": [
+        {
+          "src": "/static/img/icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Import Cards",
+      "short_name": "Import",
+      "description": "Sync cards from Moxfield CSV or Google Drive",
+      "url": "/import?source=pwa",
+      "icons": [
+        {
+          "src": "/static/img/icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    }
+  ]
+}

@@ -14,10 +14,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 from flask import current_app
+import requests
 from sqlalchemy import and_, func, or_, tuple_
 
 from card_utils import fix_mojibake, normalize_card_name, normalize_condition, normalize_finish
-from models import BinderItem, Card, db, utc_now
+from models import BinderItem, Card, User, db, utc_now
 from providers.mightymeeple import MightyMeepleProvider
 from providers.scryfall import ScryfallProvider, UUID_PATTERN
 
@@ -758,3 +759,317 @@ def import_cards_to_binder(
         "total_quantity": total_qty,
         "unresolved": unresolved_names,
     }
+
+
+# =============================================================================
+# Discord Webhook Notification Service & 5-Minute Batch Worker
+# =============================================================================
+
+DISCORD_WEBHOOK_URL_RE = re.compile(
+    r"^https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\d+/[\w-]+(?:\?[^\s]*)?$",
+    re.IGNORECASE,
+)
+
+
+def validate_discord_webhook_url(raw_url: Optional[str]) -> Optional[str]:
+    """
+    Validates a Discord incoming webhook URL.
+    Returns None if empty, or the cleaned URL if valid.
+    Raises ValueError if non-empty and not a valid Discord webhook URL.
+    """
+    if raw_url is None:
+        return None
+    cleaned = str(raw_url).strip()
+    if not cleaned:
+        return None
+    if not DISCORD_WEBHOOK_URL_RE.match(cleaned):
+        raise ValueError(
+            "Please enter a valid Discord Webhook URL (https://discord.com/api/webhooks/...)."
+        )
+    return cleaned
+
+
+def build_discord_notification_payload(
+    items: List[BinderItem],
+    app_base_url: str = "",
+) -> Dict[str, Any]:
+    """
+    Formats a batch of newly listed `for_trade` / `meeple_bound` BinderItem rows
+    into a Discord webhook payload with summary content and a rich embed.
+    """
+    total_qty = sum(int(item.quantity or 1) for item in items)
+    trade_qty = sum(int(item.quantity or 1) for item in items if item.status == "for_trade")
+    meeple_qty = sum(int(item.quantity or 1) for item in items if item.status == "meeple_bound")
+
+    owners: List[str] = []
+    for item in items:
+        if item.user:
+            label = item.user.display_name
+            if item.user.discord_handle:
+                label = f"{label} ({item.user.discord_handle})"
+            if label not in owners:
+                owners.append(label)
+
+    if len(owners) == 1:
+        who_label = f"**{owners[0]}**"
+    elif len(owners) > 1:
+        who_label = f"**{', '.join(owners)}**"
+    else:
+        who_label = "A pod member"
+
+    status_parts = []
+    if trade_qty:
+        status_parts.append(f"**{trade_qty}** For Trade")
+    if meeple_qty:
+        status_parts.append(f"**{meeple_qty}** Meeple Bound")
+    breakdown = " & ".join(status_parts) if status_parts else f"**{total_qty}** card(s)"
+
+    content = f"🃏 {who_label} listed {breakdown} on **VaultSwap**!"
+
+    lines: List[str] = []
+    max_display = 25
+    for item in items[:max_display]:
+        card = item.card
+        card_name = card.name if card else "Unknown Card"
+        set_code = (card.set_code or "").upper() if card else ""
+        col_num = card.collector_number if card else ""
+        printing = f" [{set_code} #{col_num}]" if (set_code and col_num) else (f" [{set_code}]" if set_code else "")
+
+        finish_tag = ""
+        if item.finish == "foil":
+            finish_tag = " ✨ *Foil*"
+        elif item.finish == "etched":
+            finish_tag = " ✨ *Etched*"
+
+        cond_tag = f" ({item.condition})" if item.condition else ""
+        status_badge = "🟣 **Meeple**" if item.status == "meeple_bound" else "🔄 **Trade**"
+
+        price_bits: List[str] = []
+        mkt = item.market_price
+        if mkt is not None:
+            price_bits.append(f"${float(mkt):.2f}")
+        if item.mm_buylist_credit is not None or item.mm_buylist_cash is not None:
+            mm_parts = []
+            if item.mm_buylist_credit is not None:
+                mm_parts.append(f"${float(item.mm_buylist_credit):.2f} Cr")
+            if item.mm_buylist_cash is not None:
+                mm_parts.append(f"${float(item.mm_buylist_cash):.2f} Cash")
+            price_bits.append(f"Meeple: {' / '.join(mm_parts)}")
+        price_str = f" — {' | '.join(price_bits)}" if price_bits else ""
+
+        owner_suffix = ""
+        if len(owners) > 1 and item.user:
+            owner_suffix = f" *(by {item.user.display_name})*"
+
+        qty = int(item.quantity or 1)
+        lines.append(
+            f"• {status_badge} `{qty}x` **{card_name}**{printing}{finish_tag}{cond_tag}{price_str}{owner_suffix}"
+        )
+
+    if len(items) > max_display:
+        remaining = len(items) - max_display
+        lines.append(f"*...and {remaining} more card listing(s) in the Pod Feed.*")
+
+    description = "\n".join(lines)
+    if len(description) > 4000:
+        description = description[:3990] + "\n..."
+
+    embed: Dict[str, Any] = {
+        "title": "New Pod Cards Available",
+        "description": description,
+        "color": 0xA855F7 if meeple_qty > 0 else 0x10B981,
+        "footer": {"text": "VaultSwap Pod Feed • 5-minute batched notification"},
+    }
+    if app_base_url:
+        embed["url"] = f"{app_base_url.rstrip('/')}/pod"
+
+    return {
+        "username": "VaultSwap",
+        "content": content,
+        "embeds": [embed],
+    }
+
+
+def send_discord_webhook(webhook_url: str, payload: Dict[str, Any], timeout: float = 10.0) -> bool:
+    """Posts a JSON payload to a Discord incoming webhook URL."""
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=timeout)
+        if 200 <= resp.status_code < 300:
+            return True
+        logger.warning(
+            "Discord webhook returned HTTP %s for %s: %s",
+            resp.status_code,
+            webhook_url[:48],
+            resp.text[:200],
+        )
+        return False
+    except Exception as exc:
+        logger.warning("Failed to send Discord webhook to %s: %s", webhook_url[:48], exc)
+        return False
+
+
+class DiscordNotificationWorker:
+    """
+    Background worker that waits 5 minutes (configurable via DISCORD_WEBHOOK_DELAY_SEC)
+    after cards are listed for `for_trade` or `meeple_bound`, then posts a batched summary
+    of the newly available cards to all configured user Discord webhooks.
+    """
+
+    def __init__(self, app=None, sender_fn=None):
+        self.app = app
+        self.sender_fn = sender_fn or send_discord_webhook
+        self._pending_ids: Set[int] = set()
+        self._deadline: Optional[float] = None
+        self._in_flight: bool = False
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._thread: Optional[threading.Thread] = None
+
+    def init_app(self, app) -> None:
+        self.app = app
+
+    def _ensure_started(self) -> None:
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(
+                target=self._run,
+                name="VaultSwap-DiscordWorker",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def is_pending(self, item_id: int) -> bool:
+        with self._lock:
+            return item_id in self._pending_ids
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending_ids)
+
+    def _get_delay_sec(self) -> float:
+        if self.app is not None:
+            try:
+                return max(0.0, float(self.app.config.get("DISCORD_WEBHOOK_DELAY_SEC", 300.0)))
+            except (ValueError, TypeError):
+                pass
+        return 300.0
+
+    def enqueue(self, item_ids: List[int]) -> int:
+        """
+        Adds newly listed `for_trade` / `meeple_bound` binder item IDs to the batch
+        and sets the 5-minute timer window.
+        """
+        valid_ids = [int(i) for i in item_ids if i is not None]
+        if not valid_ids:
+            return 0
+
+        delay_sec = self._get_delay_sec()
+        added = 0
+        with self._cond:
+            for item_id in valid_ids:
+                if item_id not in self._pending_ids:
+                    self._pending_ids.add(item_id)
+                    added += 1
+            self._deadline = time.monotonic() + delay_sec
+            self._ensure_started()
+            self._cond.notify_all()
+        return added
+
+    def flush_now(self, timeout: float = 10.0) -> bool:
+        """Immediately expires the current timer window and waits for dispatch (useful for tests)."""
+        with self._cond:
+            if self._pending_ids:
+                self._deadline = time.monotonic()
+                self._ensure_started()
+                self._cond.notify_all()
+        return self.wait_until_idle(timeout=timeout)
+
+    def wait_until_idle(self, timeout: float = 10.0) -> bool:
+        """Waits until all pending items and active webhook dispatches complete."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._pending_ids or self._in_flight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(timeout=remaining)
+            return True
+
+    def _dispatch_batch(self, batch_ids: List[int]) -> None:
+        if not batch_ids or self.app is None:
+            return
+
+        with self.app.app_context():
+            # Gather distinct valid Discord webhook URLs configured by pod users
+            users_with_webhooks = (
+                User.query.filter(
+                    User.discord_webhook_url.isnot(None),
+                    User.discord_webhook_url != "",
+                )
+                .all()
+            )
+            webhook_urls: List[str] = []
+            for u in users_with_webhooks:
+                url = (u.discord_webhook_url or "").strip()
+                if url and url not in webhook_urls:
+                    webhook_urls.append(url)
+
+            if not webhook_urls:
+                return
+
+            # Query items that are STILL public (`for_trade` or `meeple_bound`) after the 5-minute wait
+            items = (
+                BinderItem.query.options(
+                    db.joinedload(BinderItem.card),
+                    db.joinedload(BinderItem.user),
+                )
+                .filter(
+                    BinderItem.id.in_(batch_ids),
+                    BinderItem.status.in_(["for_trade", "meeple_bound"]),
+                )
+                .order_by(BinderItem.updated_at.asc(), BinderItem.id.asc())
+                .all()
+            )
+            if not items:
+                return
+
+            base_url = str(self.app.config.get("APP_BASE_URL") or "").strip()
+            payload = build_discord_notification_payload(items, app_base_url=base_url)
+
+            for url in webhook_urls:
+                self.sender_fn(url, payload)
+
+    def _run(self) -> None:
+        while True:
+            batch_ids: List[int] = []
+            with self._cond:
+                while not self._pending_ids:
+                    self._cond.wait()
+
+                now = time.monotonic()
+                target = self._deadline if self._deadline is not None else now
+                remaining = target - now
+                if remaining > 0:
+                    self._cond.wait(timeout=remaining)
+                    continue
+
+                batch_ids = sorted(self._pending_ids)
+                self._pending_ids.clear()
+                self._deadline = None
+                self._in_flight = True
+
+            try:
+                self._dispatch_batch(batch_ids)
+            except Exception as exc:
+                logger.error("DiscordNotificationWorker error dispatching batch %s: %s", batch_ids, exc)
+                try:
+                    if self.app is not None:
+                        with self.app.app_context():
+                            db.session.rollback()
+                except Exception:
+                    pass
+            finally:
+                with self._cond:
+                    self._in_flight = False
+                    if not self._pending_ids:
+                        self._cond.notify_all()
+

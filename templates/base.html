@@ -5,6 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#020617">
     <title>{% block title %}VaultSwap // Pod MTG Binder{% endblock %}</title>
+
+    <!-- Progressive Web App (PWA) & Mobile Install -->
+    <link rel="manifest" href="{{ url_for('pwa_manifest') }}">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="VaultSwap">
+    <meta name="application-name" content="VaultSwap">
+    <meta name="msapplication-TileColor" content="#020617">
+    <meta name="msapplication-TileImage" content="{{ url_for('static', filename='img/icons/icon-192.png') }}">
+
+    <!-- Icons & Favicons -->
+    <link rel="icon" type="image/x-icon" href="{{ url_for('favicon') }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='img/icons/favicon-32x32.png') }}">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='img/icons/favicon-16x16.png') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('apple_touch_icon') }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('apple_touch_icon') }}">
+
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     <style>
@@ -36,6 +54,16 @@
 
             {% if current_user %}
             <div class="flex items-center gap-2 shrink-0">
+                <!-- Install App Button (Visible when installable) -->
+                <button type="button" id="header-install-btn" onclick="triggerPwaInstall()"
+                    class="hidden items-center gap-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 rounded-full px-2.5 py-1 text-xs font-semibold transition active:scale-95 shadow-sm"
+                    title="Install VaultSwap on your phone">
+                    <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    <span class="hidden min-[420px]:inline">Install App</span>
+                </button>
+
                 <!-- User Dropdown Menu -->
                 <div class="relative" id="user-menu-container">
                     <button type="button" id="user-menu-button" onclick="toggleUserDropdown(event)"
@@ -80,6 +108,14 @@
                         <div class="border-t border-slate-800/80 my-1"></div>
                         {% endif %}
 
+                        <button type="button" id="dropdown-install-btn" onclick="triggerPwaInstall()"
+                            class="hidden w-full text-left px-3.5 py-2.5 text-emerald-300 hover:bg-emerald-500/10 items-center gap-2.5 transition font-semibold">
+                            <svg class="w-4 h-4 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                            </svg>
+                            <span>Install App on Phone</span>
+                        </button>
+
                         <button type="button" onclick="openMcpGuideModal()"
                             class="w-full text-left px-3.5 py-2.5 text-slate-200 hover:bg-emerald-500/10 hover:text-emerald-300 flex items-center gap-2.5 transition font-semibold">
                             <svg class="w-4 h-4 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -115,6 +151,17 @@
                         </a>
                     </div>
                 </div>
+            </div>
+            {% else %}
+            <div class="flex items-center gap-2 shrink-0">
+                <button type="button" id="guest-install-btn" onclick="triggerPwaInstall()"
+                    class="hidden items-center gap-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 rounded-full px-2.5 py-1 text-xs font-semibold transition active:scale-95 shadow-sm"
+                    title="Install VaultSwap App">
+                    <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    <span>Install App</span>
+                </button>
             </div>
             {% endif %}
         </div>
@@ -173,6 +220,26 @@
                     <label class="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Discord Handle (Optional)</label>
                     <input type="text" name="discord_handle" value="{{ current_user.discord_handle or '' }}" placeholder="@username"
                         class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
+                </div>
+                <div>
+                    <div class="flex items-center justify-between mb-1">
+                        <label class="block text-[11px] font-semibold uppercase tracking-wider text-slate-400">Discord Webhook URL (Optional)</label>
+                        {% if current_user.discord_webhook_url %}
+                        <span class="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 rounded-full">Active</span>
+                        {% endif %}
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <input type="url" name="discord_webhook_url" value="{{ current_user.discord_webhook_url or '' }}" placeholder="https://discord.com/api/webhooks/..."
+                            class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500">
+                        <button type="submit" formaction="{{ url_for('test_discord_webhook') }}" formnovalidate
+                            class="px-2.5 py-2 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 text-[11px] font-semibold transition shrink-0"
+                            title="Send a test message to this Discord webhook">
+                            Test
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                        Notifies you when anyone lists cards for <strong class="text-slate-300">Trade</strong> or <strong class="text-slate-300">Mighty Meeple</strong>. Waits 5 minutes after items are added to batch new cards into a single post.
+                    </p>
                 </div>
                 <div class="text-[11px] text-slate-400">Signed in as <span class="text-slate-200">{{ current_user.email }}</span></div>
                 {% if current_user.is_admin %}
@@ -345,6 +412,130 @@
         </div>
     </div>
 
+    <!-- PWA Install Guide Modal -->
+    <div id="install-guide-modal" class="hidden fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto" onclick="closeInstallGuideModal()">
+        <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4 shadow-2xl my-auto text-left" onclick="event.stopPropagation()">
+            <div class="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+                <div class="flex items-center gap-2.5">
+                    <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-md shadow-emerald-950/50 shrink-0">
+                        <svg class="w-5 h-5 text-slate-950" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.4">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-sm font-bold text-white uppercase tracking-wider">Install VaultSwap</h2>
+                        <p class="text-[11px] text-slate-400">Add to your phone for full-screen pod binder access</p>
+                    </div>
+                </div>
+                <button type="button" onclick="closeInstallGuideModal()" class="text-slate-400 hover:text-white text-xl leading-none px-1">&times;</button>
+            </div>
+
+            <!-- Native Prompt Button if available -->
+            <div id="pwa-prompt-direct-container" class="hidden">
+                <button type="button" onclick="executeNativeInstallPrompt()"
+                    class="w-full py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs tracking-wide transition shadow-lg shadow-emerald-500/20 active:scale-95 flex items-center justify-center gap-2">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    <span>Add to Home Screen Now</span>
+                </button>
+                <div class="text-[10px] text-slate-400 text-center mt-2">or follow the step-by-step instructions below:</div>
+            </div>
+
+            <!-- Platform Tabs -->
+            <div class="flex items-center gap-2 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+                <button type="button" id="tab-btn-ios" onclick="switchInstallTab('ios')"
+                    class="flex-1 py-1.5 px-3 rounded-lg font-semibold text-center transition bg-slate-800 text-emerald-400 shadow-sm flex items-center justify-center gap-1.5">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.37c.62-.75 1.04-1.8 0.93-2.85-.9.04-2 .6-2.65 1.35-.58.67-1.09 1.74-.95 2.77.99.08 2.04-.52 2.67-1.27z"/>
+                    </svg>
+                    <span>iPhone / iPad</span>
+                </button>
+                <button type="button" id="tab-btn-android" onclick="switchInstallTab('android')"
+                    class="flex-1 py-1.5 px-3 rounded-lg font-semibold text-center transition text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-1.0001s.4482-.9996.9993-.9996c.5516 0 .9998.4481.9998.9996 0 .5515-.4482 1.0001-.9998 1.0001m-11.046 0c-.5511 0-.9993-.4486-.9993-1.0001s.4482-.9996.9993-.9996c.5516 0 .9998.4481.9998.9996 0 .5515-.4482 1.0001-.9998 1.0001m11.4045-6.02l1.9973-3.4592a.416.416 0 00-.1521-.5676.416.416 0 00-.5676.1521l-2.0223 3.503C15.5902 8.4101 13.8533 8.081 12 8.081s-3.5902.3291-5.1368.8687L4.8409 5.4467a.4161.4161 0 00-.5677-.1521.4157.4157 0 00-.1521.5676l1.9973 3.4592C2.6889 11.1867.3432 14.6589 0 18.761h24c-.3432-4.1021-2.6889-7.5743-6.1185-9.4396"/>
+                    </svg>
+                    <span>Android / Chrome</span>
+                </button>
+            </div>
+
+            <!-- iOS Instructions Panel -->
+            <div id="install-guide-ios" class="space-y-3 text-xs text-slate-300">
+                <div class="flex items-start gap-3 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                    <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">1</span>
+                    <div>
+                        <span class="font-semibold text-white">Open in Safari</span>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Ensure you are viewing VaultSwap in Apple Safari on your iPhone.</p>
+                    </div>
+                </div>
+                <div class="flex items-start gap-3 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                    <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">2</span>
+                    <div>
+                        <span class="font-semibold text-white">Tap the Share Button</span>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Tap the Share icon <svg class="inline-block w-3.5 h-3.5 text-sky-400 mx-0.5 -mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg> in Safari's bottom toolbar.</p>
+                    </div>
+                </div>
+                <div class="flex items-start gap-3 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                    <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">3</span>
+                    <div>
+                        <span class="font-semibold text-white">Select "Add to Home Screen"</span>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Scroll down the share sheet and tap <strong>Add to Home Screen</strong> <svg class="inline-block w-3.5 h-3.5 text-slate-300 mx-0.5 -mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" /></svg>.</p>
+                    </div>
+                </div>
+                <div class="flex items-start gap-3 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                    <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">4</span>
+                    <div>
+                        <span class="font-semibold text-white">Tap "Add" in Top Right</span>
+                        <p class="text-[11px] text-slate-400 mt-0.5">VaultSwap will launch in full-screen standalone mode like a native app!</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Android Instructions Panel -->
+            <div id="install-guide-android" class="hidden space-y-3 text-xs text-slate-300">
+                <div class="flex items-start gap-3 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                    <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">1</span>
+                    <div>
+                        <span class="font-semibold text-white">Open in Chrome or Edge</span>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Ensure you are using Google Chrome, Edge, or Samsung Internet.</p>
+                    </div>
+                </div>
+                <div class="flex items-start gap-3 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                    <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">2</span>
+                    <div>
+                        <span class="font-semibold text-white">Tap Menu (⋮)</span>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Tap the three vertical dots menu in the browser top-right corner.</p>
+                    </div>
+                </div>
+                <div class="flex items-start gap-3 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                    <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">3</span>
+                    <div>
+                        <span class="font-semibold text-white">Tap "Install app" or "Add to Home screen"</span>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Confirm the prompt to install the app with full offline support.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Wi-Fi Pod Connection Tip -->
+            <div class="bg-emerald-950/30 border border-emerald-500/30 rounded-xl p-3 text-[11px] text-emerald-300/90 flex items-start gap-2">
+                <svg class="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div>
+                    <span class="font-semibold text-white block">Local Wi-Fi Pod Play</span>
+                    <span>When running on a local desktop, ensure your phone is connected to the same Wi-Fi network.</span>
+                </div>
+            </div>
+
+            <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button type="button" onclick="closeInstallGuideModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition">
+                    Got it
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Sticky Bottom Navigation Bar (3 Primary Tabs) -->
     <nav class="fixed bottom-0 inset-x-0 z-40 bg-slate-950/95 backdrop-blur-md border-t border-slate-800 pb-safe">
         <div class="max-w-2xl mx-auto grid grid-cols-3 h-16">
@@ -479,8 +670,159 @@
                 closeUserDropdown();
                 closeMcpGuideModal();
                 closeProfileModal();
+                closeInstallGuideModal();
             }
         });
+
+        /* =====================================================================
+           PWA & Mobile Installation Handler
+           ===================================================================== */
+        let deferredInstallPrompt = null;
+        const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+        const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
+
+        function showInstallTriggers() {
+            if (isStandalone) return;
+            const headerBtn = document.getElementById('header-install-btn');
+            const dropBtn = document.getElementById('dropdown-install-btn');
+            const guestBtn = document.getElementById('guest-install-btn');
+            const loginPrompt = document.getElementById('login-install-prompt');
+
+            if (headerBtn) headerBtn.classList.remove('hidden'), headerBtn.classList.add('inline-flex');
+            if (dropBtn) dropBtn.classList.remove('hidden'), dropBtn.classList.add('flex');
+            if (guestBtn) guestBtn.classList.remove('hidden'), guestBtn.classList.add('inline-flex');
+            if (loginPrompt) loginPrompt.classList.remove('hidden');
+        }
+
+        function hideInstallTriggers() {
+            const headerBtn = document.getElementById('header-install-btn');
+            const dropBtn = document.getElementById('dropdown-install-btn');
+            const guestBtn = document.getElementById('guest-install-btn');
+            const loginPrompt = document.getElementById('login-install-prompt');
+
+            if (headerBtn) headerBtn.classList.add('hidden');
+            if (dropBtn) dropBtn.classList.add('hidden');
+            if (guestBtn) guestBtn.classList.add('hidden');
+            if (loginPrompt) loginPrompt.classList.add('hidden');
+        }
+
+        function triggerPwaInstall() {
+            closeUserDropdown();
+            if (deferredInstallPrompt) {
+                deferredInstallPrompt.prompt();
+                deferredInstallPrompt.userChoice.then((choice) => {
+                    if (choice.outcome === 'accepted') {
+                        hideInstallTriggers();
+                        closeInstallGuideModal();
+                    }
+                    deferredInstallPrompt = null;
+                }).catch(() => {
+                    openInstallGuideModal();
+                });
+            } else {
+                openInstallGuideModal();
+            }
+        }
+
+        function executeNativeInstallPrompt() {
+            if (deferredInstallPrompt) {
+                deferredInstallPrompt.prompt();
+                deferredInstallPrompt.userChoice.then((choice) => {
+                    if (choice.outcome === 'accepted') {
+                        hideInstallTriggers();
+                        closeInstallGuideModal();
+                    }
+                    deferredInstallPrompt = null;
+                });
+            }
+        }
+
+        function openInstallGuideModal() {
+            const modal = document.getElementById('install-guide-modal');
+            if (!modal) return;
+
+            // Configure tabs based on device
+            if (isIos) {
+                switchInstallTab('ios');
+            } else {
+                switchInstallTab('android');
+            }
+
+            const promptBtn = document.getElementById('pwa-prompt-direct-container');
+            if (promptBtn) {
+                if (deferredInstallPrompt) {
+                    promptBtn.classList.remove('hidden');
+                } else {
+                    promptBtn.classList.add('hidden');
+                }
+            }
+
+            modal.classList.remove('hidden');
+        }
+
+        function closeInstallGuideModal() {
+            const modal = document.getElementById('install-guide-modal');
+            if (modal) modal.classList.add('hidden');
+        }
+
+        function switchInstallTab(platform) {
+            const iosPanel = document.getElementById('install-guide-ios');
+            const androidPanel = document.getElementById('install-guide-android');
+            const iosBtn = document.getElementById('tab-btn-ios');
+            const androidBtn = document.getElementById('tab-btn-android');
+
+            if (platform === 'ios') {
+                if (iosPanel) iosPanel.classList.remove('hidden');
+                if (androidPanel) androidPanel.classList.add('hidden');
+                if (iosBtn) {
+                    iosBtn.className = 'flex-1 py-1.5 px-3 rounded-lg font-semibold text-center transition bg-slate-800 text-emerald-400 shadow-sm flex items-center justify-center gap-1.5';
+                }
+                if (androidBtn) {
+                    androidBtn.className = 'flex-1 py-1.5 px-3 rounded-lg font-semibold text-center transition text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5';
+                }
+            } else {
+                if (iosPanel) iosPanel.classList.add('hidden');
+                if (androidPanel) androidPanel.classList.remove('hidden');
+                if (androidBtn) {
+                    androidBtn.className = 'flex-1 py-1.5 px-3 rounded-lg font-semibold text-center transition bg-slate-800 text-emerald-400 shadow-sm flex items-center justify-center gap-1.5';
+                }
+                if (iosBtn) {
+                    iosBtn.className = 'flex-1 py-1.5 px-3 rounded-lg font-semibold text-center transition text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5';
+                }
+            }
+        }
+
+        // Catch Android/Chrome beforeinstallprompt
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredInstallPrompt = e;
+            showInstallTriggers();
+        });
+
+        // Listen for successful install
+        window.addEventListener('appinstalled', () => {
+            hideInstallTriggers();
+            closeInstallGuideModal();
+            console.log('[PWA] VaultSwap installed to home screen successfully.');
+        });
+
+        // Initialize iOS triggers or service worker
+        if (isIos && !isStandalone) {
+            showInstallTriggers();
+        }
+
+        // Register Service Worker
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js', { scope: '/' })
+                    .then((reg) => {
+                        console.log('[PWA] Service Worker registered in scope:', reg.scope);
+                    })
+                    .catch((err) => {
+                        console.warn('[PWA] Service Worker registration failed:', err);
+                    });
+            });
+        }
     </script>
     <script src="{{ url_for('static', filename='js/binder_controls.js') }}"></script>
     {% block scripts %}{% endblock %}

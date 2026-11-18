@@ -1553,5 +1553,262 @@ def test_buylist_tradein_first_and_lightly_played_condition(app, client):
         assert feed_html.index("$13.00 Credit") < feed_html.index("$10.00 Cash")
 
 
+def test_pwa_manifest_route_and_structure(client):
+    """Verifies manifest route responds with application/manifest+json and valid PWA config."""
+    # Both .webmanifest and .json routes work
+    for path in ["/manifest.webmanifest", "/manifest.json"]:
+        res = client.get(path)
+        assert res.status_code == 200
+        assert "application/manifest+json" in res.content_type
+        data = res.get_json()
+        assert data["name"] == "VaultSwap // MTG Pod Binder"
+        assert data["short_name"] == "VaultSwap"
+        assert data["display"] == "standalone"
+        assert data["start_url"] == "/?source=pwa"
+        assert data["theme_color"] == "#020617"
+        assert data["background_color"] == "#020617"
+        assert len(data["icons"]) >= 2
+        # Verify icon URLs
+        icon_sizes = [i["sizes"] for i in data["icons"]]
+        assert "192x192" in icon_sizes
+        assert "512x512" in icon_sizes
+
+
+def test_pwa_service_worker_route_and_headers(client):
+    """Verifies /sw.js is served from root with Service-Worker-Allowed header."""
+    res = client.get("/sw.js")
+    assert res.status_code == 200
+    assert "application/javascript" in res.content_type
+    assert res.headers.get("Service-Worker-Allowed") == "/"
+    content = res.get_data(as_text=True)
+    assert "vaultswap-v1" in content
+    assert "addEventListener('install'" in content
+    assert "addEventListener('fetch'" in content
+
+
+def test_pwa_offline_page(client):
+    """Verifies /offline route renders the offline fallback template."""
+    res = client.get("/offline")
+    assert res.status_code == 200
+    html = res.get_data(as_text=True)
+    assert "You're Currently Offline" in html
+    assert "Retry Connection" in html
+
+
+def test_pwa_icons_and_favicons(client):
+    """Verifies touch icons and favicon endpoints return 200."""
+    res_apple = client.get("/apple-touch-icon.png")
+    assert res_apple.status_code == 200
+    assert res_apple.content_type == "image/png"
+
+    res_favicon = client.get("/favicon.ico")
+    assert res_favicon.status_code == 200
+
+
+def test_pwa_mobile_meta_tags_in_templates(client):
+    """Verifies base template contains required PWA and Apple mobile meta tags."""
+    res = client.get("/login")
+    assert res.status_code == 200
+    html = res.get_data(as_text=True)
+    assert 'rel="manifest"' in html
+    assert 'name="apple-mobile-web-app-capable" content="yes"' in html
+    assert 'name="apple-mobile-web-app-status-bar-style" content="black-translucent"' in html
+    assert 'name="apple-mobile-web-app-title" content="VaultSwap"' in html
+    assert 'rel="apple-touch-icon"' in html
+    assert 'triggerPwaInstall' in html
+    assert 'serviceWorker' in html
+    assert 'install-guide-modal' in html
+
+
+def test_discord_webhook_profile_configuration_and_validation(app, client):
+    """Verifies users can configure, test, and clear a Discord webhook URL in their profile."""
+    with app.app_context():
+        user = _login_user(client, "jason@pod.local", "Jason")
+        valid_hook = "https://discord.com/api/webhooks/123456789012345678/abcdef123456_token-xyz"
+
+        # Save valid Discord webhook URL
+        resp = client.post(
+            "/profile",
+            data={
+                "display_name": "Jason M",
+                "discord_handle": "@jason_mtg",
+                "discord_webhook_url": valid_hook,
+            },
+            follow_redirects=True,
+        )
+        assert resp.status_code == 200
+        updated = db.session.get(User, user.id)
+        assert updated.display_name == "Jason M"
+        assert updated.discord_handle == "@jason_mtg"
+        assert updated.discord_webhook_url == valid_hook
+
+        # Reject invalid non-Discord URL without overwriting existing valid webhook
+        bad_resp = client.post(
+            "/profile",
+            data={
+                "display_name": "Jason M",
+                "discord_handle": "@jason_mtg",
+                "discord_webhook_url": "https://example.com/not-a-discord-webhook",
+            },
+            follow_redirects=True,
+        )
+        assert bad_resp.status_code == 200
+        assert "Please enter a valid Discord Webhook URL" in bad_resp.get_data(as_text=True)
+        assert db.session.get(User, user.id).discord_webhook_url == valid_hook
+
+        # Test webhook endpoint
+        sent_calls = []
+        with patch.object(
+            app.discord_worker,
+            "sender_fn",
+            side_effect=lambda url, payload: (sent_calls.append((url, payload)) or True),
+        ):
+            test_resp = client.post("/profile/test-webhook", follow_redirects=True)
+            assert test_resp.status_code == 200
+            assert len(sent_calls) == 1
+            assert sent_calls[0][0] == valid_hook
+            assert "VaultSwap Discord Webhook Connected" in sent_calls[0][1]["content"]
+
+        # Clear webhook URL
+        clear_resp = client.post(
+            "/profile",
+            data={
+                "display_name": "Jason M",
+                "discord_handle": "@jason_mtg",
+                "discord_webhook_url": "",
+            },
+            follow_redirects=True,
+        )
+        assert clear_resp.status_code == 200
+        assert db.session.get(User, user.id).discord_webhook_url is None
+
+
+def test_discord_webhook_batches_and_posts_after_delay(app, client):
+    """
+    Verifies that when anyone lists cards for trade or meeple, the worker waits
+    for the configured delay window, batches newly added cards, excludes any card
+    reverted back to private during the wait, and posts to configured Discord webhooks.
+    """
+    with app.app_context():
+        # Default config must be 300s (5 minutes)
+        assert app.config["DISCORD_WEBHOOK_DELAY_SEC"] == 300.0
+        # Use short delay for test execution speed while testing timer wait + batching
+        app.config["DISCORD_WEBHOOK_DELAY_SEC"] = 0.15
+
+        hook_alice = "https://discord.com/api/webhooks/1111111111/token_alice"
+        hook_bob = "https://discordapp.com/api/webhooks/2222222222/token_bob"
+
+        alice = _login_user(client, "alice_hook@pod.local", "Alice", discord_handle="@alice")
+        alice.discord_webhook_url = hook_alice
+        db.session.commit()
+
+        # Bob and Carol share hook_bob (to verify deduplication of identical webhook URLs)
+        bob = User(
+            google_sub="sub-bob-hook",
+            email="bob_hook@pod.local",
+            display_name="Bob",
+            discord_handle="@bob",
+            discord_webhook_url=hook_bob,
+        )
+        carol = User(
+            google_sub="sub-carol-hook",
+            email="carol_hook@pod.local",
+            display_name="Carol",
+            discord_webhook_url=hook_bob,
+        )
+        db.session.add_all([bob, carol])
+
+        c1 = _make_card("Rhystic Study", "WOT", "25", usd_price=42.00)
+        c2 = _make_card("Smothering Tithe", "CMM", "57", usd_price=25.00)
+        c3 = _make_card("Sol Ring", "CMM", "410", usd_price=1.50)
+
+        i1 = BinderItem(
+            user_id=alice.id,
+            scryfall_id=c1.scryfall_id,
+            quantity=1,
+            finish="nonfoil",
+            status="private",
+            mm_in_stock=True,
+            mm_retail_price=45.00,
+            mm_buylist_cash=22.00,
+            mm_buylist_credit=28.60,
+            mm_checked_at=utc_now(),
+        )
+        i2 = BinderItem(
+            user_id=alice.id,
+            scryfall_id=c2.scryfall_id,
+            quantity=2,
+            finish="foil",
+            status="private",
+            mm_in_stock=True,
+            mm_retail_price=38.00,
+            mm_buylist_cash=18.00,
+            mm_buylist_credit=23.40,
+            mm_checked_at=utc_now(),
+        )
+        i3 = BinderItem(
+            user_id=alice.id,
+            scryfall_id=c3.scryfall_id,
+            quantity=1,
+            finish="nonfoil",
+            status="private",
+            mm_in_stock=True,
+            mm_retail_price=2.00,
+            mm_buylist_cash=0.50,
+            mm_buylist_credit=0.65,
+            mm_checked_at=utc_now(),
+        )
+        db.session.add_all([i1, i2, i3])
+        db.session.commit()
+
+        dispatched = []
+
+        def fake_sender(url, payload):
+            dispatched.append((url, payload))
+            return True
+
+        with patch.object(app.discord_worker, "sender_fn", side_effect=fake_sender):
+            # 1. Alice lists Rhystic Study for trade
+            resp1 = client.post(f"/binder/{i1.id}/status", data={"status": "for_trade"})
+            assert resp1.status_code == 200
+
+            # 2. Alice bulk-lists Smothering Tithe and Sol Ring for meeple_bound
+            resp2 = client.post(
+                "/binder/bulk-status",
+                json={"status": "meeple_bound", "item_ids": [i2.id, i3.id]},
+            )
+            assert resp2.status_code == 200
+
+            # 3. Before the 5-minute window elapses, Alice reverts Sol Ring back to private
+            resp3 = client.post(f"/binder/{i3.id}/status", data={"status": "private"})
+            assert resp3.status_code == 200
+
+            # Should still be pending before timer expires
+            assert len(dispatched) == 0
+            assert app.discord_worker.pending_count() == 3
+
+            # Wait for timer window to elapse and dispatch
+            assert app.discord_worker.wait_until_idle(timeout=5.0)
+
+        # Delivered once to hook_alice and once to hook_bob (deduplicated across Bob & Carol)
+        assert len(dispatched) == 2
+        urls_notified = [u for u, _ in dispatched]
+        assert urls_notified == [hook_alice, hook_bob]
+
+        payload = dispatched[0][1]
+        assert "Alice (@alice)" in payload["content"]
+        assert "**1** For Trade" in payload["content"]
+        assert "**2** Meeple Bound" in payload["content"]
+        embed_desc = payload["embeds"][0]["description"]
+        assert "Rhystic Study" in embed_desc
+        assert "Smothering Tithe" in embed_desc
+        assert "Foil" in embed_desc
+        assert "$23.40 Cr" in embed_desc
+        # Sol Ring was reverted to private before timer fired, so it must NOT be posted
+        assert "Sol Ring" not in embed_desc
+
+
+
+
 
 

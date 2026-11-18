@@ -18,6 +18,34 @@
 - **Incremental Google Drive Sync**: Pick large ManaBox CSVs from Google Drive via Google Picker (`drive.file` scope). Streams rows without loading the file into memory, skips unchanged files by MD5 checksum, and tracks each user's newest card created date so subsequent syncs only add newly created cards.
 - **Cross-Printing Duplicate Spotting**: Groups by `oracle_id` across different sets (e.g. 3 copies of *Rhystic Study* across 3 printings) so you can easily spot tradeable extras.
 - **Pod Feed Prioritization**: Shared pod cards are ordered with **Meeple Bound** first, ensuring friends see cards before they leave the playgroup forever.
+- **Installable Mobile PWA**: Built to be installed directly on iOS and Android phones as a standalone app with custom app icons, dark status bar, offline caching, and zero browser URL clutter.
+
+---
+
+## 📱 Installing on Your Phone (iOS & Android)
+
+VaultSwap is a full **Progressive Web App (PWA)** that can be installed directly onto your phone's home screen, behaving just like a native mobile app.
+
+### iPhone / iPad (iOS Safari)
+1. Open VaultSwap in **Apple Safari** (e.g. `http://<your-local-ip>:5055` or your hosted domain).
+2. Tap the **Share** button (the square with an arrow pointing up) at the bottom of Safari.
+3. Scroll down the menu and tap **Add to Home Screen**.
+4. Tap **Add** in the top right.
+5. Launch **VaultSwap** directly from your home screen — it will open in full-screen standalone mode without any browser URL bar or Safari controls!
+
+### Android (Google Chrome / Edge / Samsung Internet)
+1. Open VaultSwap in **Chrome** or your preferred mobile browser.
+2. An **"Install App"** button will appear in the app header or login card.
+3. Tap **Install App** (or tap the browser menu **⋮** and choose **"Install app"** / **"Add to Home screen"**).
+4. Tap **Install** to add VaultSwap to your app drawer and home screen.
+
+### Running on Local Wi-Fi for Pod Testing
+When starting the server using `.\start_app.ps1`, the script automatically detects and displays your machine's local Wi-Fi IP address:
+```
+  -> Desktop Browser:       http://localhost:5055
+  -> Phone Install (Wi-Fi): http://192.168.1.X:5055
+```
+Simply connect your phone to the same Wi-Fi network and open the URL in your phone's browser to install!
 
 ---
 

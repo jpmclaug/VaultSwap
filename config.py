@@ -116,3 +116,6 @@ class Config:
     MEEPLE_CACHE_TTL_HOURS = float(os.getenv("MEEPLE_CACHE_TTL_HOURS", 24))
     MEEPLE_RATE_LIMIT_MIN_SEC = float(os.getenv("MEEPLE_RATE_LIMIT_MIN_SEC", 1.5))
     MEEPLE_RATE_LIMIT_MAX_SEC = float(os.getenv("MEEPLE_RATE_LIMIT_MAX_SEC", 2.0))
+
+    # Discord Webhook Notification Batching Delay (Default: 300s = 5 minutes)
+    DISCORD_WEBHOOK_DELAY_SEC = float(os.getenv("DISCORD_WEBHOOK_DELAY_SEC", 300))

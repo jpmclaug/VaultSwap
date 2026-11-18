@@ -54,7 +54,13 @@ $url = "http://localhost:$Port"
 $pidFile = Join-Path $PSScriptRoot ".vaultswap.pid"
 $PID | Out-File -FilePath $pidFile -Encoding utf8
 
-Write-Host " [SYS:INIT] Starting VaultSwap Server on $url..." -ForegroundColor Cyan
+$localIP = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' -and $_.InterfaceAlias -notmatch 'Loopback' } | Select-Object -ExpandProperty IPAddress -First 1)
+
+Write-Host " [SYS:INIT] Starting VaultSwap Server..." -ForegroundColor Cyan
+Write-Host "   -> Desktop Browser:      $url" -ForegroundColor Green
+if ($localIP) {
+    Write-Host "   -> Phone Install (Wi-Fi): http://${localIP}:${Port}" -ForegroundColor Yellow
+}
 Write-Host " [*] Press Ctrl+C in this window or run .\stop_app.ps1 to shut down." -ForegroundColor DarkGray
 Write-Host ""
 

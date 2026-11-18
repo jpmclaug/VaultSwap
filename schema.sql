@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name VARCHAR(100) NOT NULL,
     avatar_url TEXT,
     discord_handle VARCHAR(100),
+    discord_webhook_url TEXT,
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
