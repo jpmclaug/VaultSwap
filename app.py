@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -23,14 +24,17 @@ from flask import (
     session,
     url_for,
 )
+from flask_wtf.csrf import CSRFProtect
 import requests
 from sqlalchemy import case, func, inspect, or_, text
 
 import drive_sync
+import jobs
+import queries
 import services
 from config import Config
-from drive_sync import DriveClient, DriveImportWorker, DriveSyncError
-from models import ActivityLog, BinderItem, Card, DriveImport, User, db, utc_now
+from drive_sync import DriveClient, DriveSyncError
+from models import ActivityLog, ApiToken, BinderItem, Card, DriveImport, Job, User, db, utc_now
 from providers.scryfall import ScryfallProvider
 
 try:
@@ -43,181 +47,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-def _compute_oracle_dupe_map(user_id: int) -> Dict[str, Dict[str, int]]:
-    """
-    Groups a user's binder items by Card.oracle_id so cross-printing duplicates
-    (e.g. 3 copies of Rhystic Study across different sets) are identified.
-    """
-    rows = (
-        db.session.query(
-            Card.oracle_id,
-            func.coalesce(func.sum(BinderItem.quantity), 0),
-            func.count(BinderItem.id),
-        )
-        .join(BinderItem, BinderItem.scryfall_id == Card.scryfall_id)
-        .filter(BinderItem.user_id == user_id)
-        .group_by(Card.oracle_id)
-        .all()
-    )
-    return {
-        str(oracle_id): {"total_qty": int(total_qty or 0), "printings": int(printing_count or 0)}
-        for oracle_id, total_qty, printing_count in rows
-    }
-
-
-def _compute_binder_stats(user_id: int) -> Dict[str, Any]:
-    """Computes summary counters and valuations for a user's private binder."""
-    items = (
-        BinderItem.query.options(db.joinedload(BinderItem.card))
-        .filter(BinderItem.user_id == user_id)
-        .all()
-    )
-    total_cards = 0
-    for_trade_qty = 0
-    meeple_qty = 0
-    total_market_value = 0.0
-    meeple_cash_total = 0.0
-    meeple_credit_total = 0.0
-
-    for item in items:
-        qty = int(item.quantity or 1)
-        total_cards += qty
-        total_market_value += item.line_market_value
-        if item.status == "for_trade":
-            for_trade_qty += qty
-        elif item.status == "meeple_bound":
-            meeple_qty += qty
-            if item.mm_buylist_cash is not None:
-                meeple_cash_total += float(item.mm_buylist_cash) * qty
-            if item.mm_buylist_credit is not None:
-                meeple_credit_total += float(item.mm_buylist_credit) * qty
-
-    return {
-        "unique_rows": len(items),
-        "total_cards": total_cards,
-        "for_trade_qty": for_trade_qty,
-        "meeple_qty": meeple_qty,
-        "total_market_value": round(total_market_value, 2),
-        "meeple_cash_total": round(meeple_cash_total, 2),
-        "meeple_credit_total": round(meeple_credit_total, 2),
-    }
-
-
-def _query_user_binder(
-    user_id: int,
-    active_filter: str = "all",
-    search_q: str = "",
-    color_filter: str = "all",
-    type_filter: str = "all",
-    finish_filter: str = "all",
-    sort_mode: str = "default",
-) -> Tuple[List[BinderItem], Dict[str, Dict[str, int]]]:
-    """Queries user's private binder strictly scoped to `user_id` with Chimera-style filters and sorting."""
-    oracle_dupe_map = _compute_oracle_dupe_map(user_id)
-
-    query = (
-        BinderItem.query.join(Card, BinderItem.scryfall_id == Card.scryfall_id)
-        .options(db.joinedload(BinderItem.card))
-        .filter(BinderItem.user_id == user_id)
-    )
-
-    if search_q:
-        like_term = f"%{search_q.strip()}%"
-        query = query.filter(
-            or_(
-                Card.name.ilike(like_term),
-                Card.set_code.ilike(like_term),
-                Card.type_line.ilike(like_term),
-            )
-        )
-
-    # Active status filter
-    if active_filter == "recent":
-        cutoff = utc_now() - timedelta(days=7)
-        query = query.filter(BinderItem.created_at >= cutoff)
-    elif active_filter == "dupes":
-        dupe_oracles = [
-            oid for oid, info in oracle_dupe_map.items() if info["total_qty"] > 1
-        ]
-        if dupe_oracles:
-            query = query.filter(
-                or_(BinderItem.quantity > 1, Card.oracle_id.in_(dupe_oracles))
-            )
-        else:
-            query = query.filter(BinderItem.quantity > 1)
-    elif active_filter == "for_trade":
-        query = query.filter(BinderItem.status == "for_trade")
-    elif active_filter == "meeple_bound":
-        query = query.filter(BinderItem.status == "meeple_bound")
-
-    # Finish filter
-    finish_norm = finish_filter.strip().lower()
-    if finish_norm in ("foil", "etched"):
-        query = query.filter(BinderItem.finish == finish_norm)
-    elif finish_norm in ("nonfoil", "normal"):
-        query = query.filter(BinderItem.finish == "nonfoil")
-    elif finish_norm == "special":
-        query = query.filter(BinderItem.finish.in_(["foil", "etched"]))
-
-    # Card Type filter (creature, instant, sorcery, artifact, enchantment, planeswalker, land, other)
-    t_clean = type_filter.strip().lower()
-    if t_clean and t_clean != "all":
-        if t_clean in ("creature", "instant", "sorcery", "artifact", "enchantment", "planeswalker", "land"):
-            query = query.filter(Card.type_line.ilike(f"%{t_clean}%"))
-        elif t_clean == "other":
-            query = query.filter(
-                ~Card.type_line.ilike("%creature%"),
-                ~Card.type_line.ilike("%instant%"),
-                ~Card.type_line.ilike("%sorcery%"),
-                ~Card.type_line.ilike("%artifact%"),
-                ~Card.type_line.ilike("%enchantment%"),
-                ~Card.type_line.ilike("%planeswalker%"),
-                ~Card.type_line.ilike("%land%"),
-            )
-
-    # Note: color_bucket can also be filtered server-side or in-memory, but let's query first or apply SQL:
-    c_clean = color_filter.strip().lower()
-
-    # Sorting
-    s_clean = sort_mode.strip().lower()
-    if s_clean == "price_desc":
-        query = query.order_by(func.coalesce(Card.usd_price, 0).desc(), Card.name.asc())
-    elif s_clean == "price_asc":
-        query = query.order_by(func.coalesce(Card.usd_price, 999999).asc(), Card.name.asc())
-    elif s_clean == "total_value_desc":
-        query = query.order_by((func.coalesce(Card.usd_price, 0) * BinderItem.quantity).desc(), Card.name.asc())
-    elif s_clean == "meeple_credit_desc":
-        query = query.order_by(func.coalesce(BinderItem.mm_buylist_credit, 0).desc(), Card.name.asc())
-    elif s_clean == "name_asc":
-        query = query.order_by(Card.name.asc(), Card.set_code.asc())
-    elif s_clean == "name_desc":
-        query = query.order_by(Card.name.desc(), Card.set_code.asc())
-    elif s_clean == "cmc_asc":
-        query = query.order_by(func.coalesce(Card.cmc, 0).asc(), Card.name.asc())
-    elif s_clean == "qty_desc":
-        query = query.order_by(BinderItem.quantity.desc(), Card.name.asc())
-    elif s_clean == "set_asc":
-        query = query.order_by(Card.set_code.asc(), Card.collector_number.asc())
-    else:
-        # Default sort
-        if active_filter == "recent":
-            query = query.order_by(BinderItem.created_at.desc(), BinderItem.id.desc())
-        elif active_filter == "dupes":
-            query = query.order_by(Card.name.asc(), Card.set_code.asc(), BinderItem.id.asc())
-        elif active_filter in ("for_trade", "meeple_bound"):
-            query = query.order_by(BinderItem.updated_at.desc(), BinderItem.id.desc())
-        else:
-            query = query.order_by(BinderItem.created_at.desc(), BinderItem.id.desc())
-
-    items = query.all()
-
-    # Python-level filter for color_bucket (ensures land, hybrid, multi, colorless match accurately)
-    if c_clean and c_clean != "all":
-        items = [item for item in items if item.color_bucket.lower() == c_clean]
-
-    return items, oracle_dupe_map
 
 
 def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
@@ -233,19 +62,24 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 str(test_config.get("DATABASE_URL_POOLED", "")),
             )
 
+    def dev_login_allowed() -> bool:
+        return bool(
+            app.config.get("TESTING")
+            or app.config.get("DEV_LOGIN_ENABLED")
+            or not app.config.get("GOOGLE_CLIENT_ID")
+        )
+
+    if not app.config.get("SECRET_KEY"):
+        if not dev_login_allowed():
+            raise RuntimeError("SECRET_KEY environment variable must be set when dev login is disabled.")
+        app.config["SECRET_KEY"] = "vaultswap-dev-secret-key-mtg"
+
+    csrf = CSRFProtect(app)
     db.init_app(app)
 
-    meeple_worker = services.MeepleBackgroundWorker()
-    meeple_worker.init_app(app)
-    app.meeple_worker = meeple_worker  # type: ignore[attr-defined]
-
-    discord_worker = services.DiscordNotificationWorker()
-    discord_worker.init_app(app)
-    app.discord_worker = discord_worker  # type: ignore[attr-defined]
-
-    drive_worker = DriveImportWorker()
-    drive_worker.init_app(app)
-    app.drive_worker = drive_worker  # type: ignore[attr-defined]
+    job_queue = jobs.JobQueue()
+    job_queue.init_app(app)
+    app.job_queue = job_queue  # type: ignore[attr-defined]
 
     # Configure Google OAuth 2.0 via Authlib if available
     google_oauth_client = None
@@ -277,6 +111,35 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         if "cmc" not in card_cols:
             with db.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE cards ADD COLUMN cmc NUMERIC(6, 2)"))
+        if "color_bucket" not in card_cols:
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE cards ADD COLUMN color_bucket VARCHAR(12)"))
+        if "primary_type" not in card_cols:
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE cards ADD COLUMN primary_type VARCHAR(15)"))
+
+        card_indexes = {idx["name"] for idx in inspect(db.engine).get_indexes("cards")}
+        if "ix_cards_color_bucket" not in card_indexes:
+            with db.engine.begin() as conn:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_cards_color_bucket ON cards (color_bucket)"))
+        if "ix_cards_primary_type" not in card_indexes:
+            with db.engine.begin() as conn:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_cards_primary_type ON cards (primary_type)"))
+
+        # One-time backfill for persisted color_bucket / primary_type in batches of 1,000
+        while True:
+            batch = (
+                Card.query.filter(or_(Card.color_bucket_col.is_(None), Card.primary_type_col.is_(None)))
+                .limit(1000)
+                .all()
+            )
+            if not batch:
+                break
+            for card_row in batch:
+                card_row.color_bucket_col = card_row.compute_color_bucket()
+                card_row.primary_type_col = card_row.compute_primary_card_type()
+            db.session.commit()
+
         with db.engine.begin() as conn:
             conn.execute(text("UPDATE binder_items SET condition = 'LP' WHERE status = 'meeple_bound'"))
 
@@ -328,13 +191,6 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             g.current_user = db.session.get(User, user_id)
         return g.current_user
 
-    def dev_login_allowed() -> bool:
-        return bool(
-            app.config.get("TESTING")
-            or app.config.get("DEV_LOGIN_ENABLED")
-            or not app.config.get("GOOGLE_CLIENT_ID")
-        )
-
     def login_required(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
@@ -364,10 +220,20 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.context_processor
     def inject_template_globals():
+        user = get_current_user()
+        user_api_tokens: List[ApiToken] = []
+        if user is not None:
+            user_api_tokens = (
+                ApiToken.query.filter_by(user_id=user.id, revoked_at=None)
+                .order_by(ApiToken.created_at.desc())
+                .all()
+            )
         return {
-            "current_user": get_current_user(),
+            "current_user": user,
             "dev_login_allowed": dev_login_allowed(),
-            "pending_meeple_count": meeple_worker.pending_count(),
+            "pending_meeple_count": job_queue.pending_count("meeple_lookup"),
+            "user_api_tokens": user_api_tokens,
+            "new_mcp_token": session.pop("new_mcp_token", None),
         }
 
     # -------------------------------------------------------------------------
@@ -776,7 +642,8 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
                 f"will be batched for 5 minutes and posted here."
             ),
         }
-        ok = discord_worker.sender_fn(webhook_url, payload)
+        sender_fn = getattr(app, "discord_sender_fn", None) or services.send_discord_webhook
+        ok = sender_fn(webhook_url, payload)
         if not ok:
             err_msg = "Could not deliver test message to Discord webhook. Check the URL and channel permissions."
             if request.is_json:
@@ -789,6 +656,102 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         flash("Test notification sent to your Discord webhook!", "success")
         return redirect(request.referrer or url_for("binder_view"))
 
+    @app.route("/profile/api-tokens", methods=["POST"])
+    @login_required
+    def create_api_token():
+        user = get_current_user()
+        label = (request.form.get("label") or (request.get_json(silent=True) or {}).get("label") or "Gemini").strip()[:100]
+        raw_token = f"vs_{secrets.token_urlsafe(32)}"
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+        tok = ApiToken(
+            user_id=user.id,
+            label=label or "Gemini",
+            token_hash=token_hash,
+            token_prefix=raw_token[:10],
+        )
+        db.session.add(tok)
+        db.session.commit()
+        log_activity(action="API_TOKEN_CREATED", user=user, details=f"Created MCP API token ({tok.token_prefix}...)")
+
+        if request.is_json:
+            return jsonify({"id": tok.id, "token": raw_token, "prefix": tok.token_prefix, "label": tok.label})
+
+        session["new_mcp_token"] = raw_token
+        base_url = (app.config.get("APP_BASE_URL") or request.host_url.rstrip("/")).rstrip("/")
+        flash(f"MCP key created (shown once): {base_url}/mcp?key={raw_token}", "success")
+        return redirect(request.referrer or url_for("binder_view"))
+
+    @app.route("/profile/api-tokens/<int:token_id>/revoke", methods=["POST"])
+    @login_required
+    def revoke_api_token(token_id: int):
+        user = get_current_user()
+        tok = ApiToken.query.filter_by(id=token_id, user_id=user.id).first_or_404()
+        if tok.revoked_at is None:
+            tok.revoked_at = utc_now()
+            db.session.commit()
+            log_activity(action="API_TOKEN_REVOKED", user=user, details=f"Revoked MCP API token ({tok.token_prefix}...)")
+        if request.is_json:
+            return jsonify({"ok": True})
+        flash("MCP API key revoked.", "success")
+        return redirect(request.referrer or url_for("binder_view"))
+
+    # -------------------------------------------------------------------------
+    # Durable Job Queue Runner (Google Cloud Tasks Target)
+    # -------------------------------------------------------------------------
+
+    def _verify_tasks_caller() -> bool:
+        shared_secret = (app.config.get("TASKS_SHARED_SECRET") or "").strip()
+        if shared_secret:
+            hdr_secret = (request.headers.get("X-Tasks-Secret") or "").strip()
+            if hdr_secret and secrets.compare_digest(hdr_secret, shared_secret):
+                return True
+
+        auth_header = (request.headers.get("Authorization") or "").strip()
+        if not auth_header.lower().startswith("bearer "):
+            return False
+        id_token_str = auth_header[7:].strip()
+        if not id_token_str:
+            return False
+
+        base_url = (app.config.get("APP_BASE_URL") or "").strip().rstrip("/")
+        expected_audience = f"{base_url}/tasks/run" if base_url else request.base_url
+        expected_sa = (app.config.get("TASKS_INVOKER_SA") or "").strip().lower()
+
+        try:
+            from google.auth.transport import requests as google_requests
+            from google.oauth2 import id_token as google_id_token
+
+            claims = google_id_token.verify_oauth2_token(
+                id_token_str,
+                google_requests.Request(),
+                audience=expected_audience,
+            )
+            if expected_sa:
+                email = str(claims.get("email") or "").strip().lower()
+                if not email or not claims.get("email_verified") or email != expected_sa:
+                    return False
+            return True
+        except Exception as exc:
+            logger.warning("Failed to verify /tasks/run OIDC token: %s", exc)
+            return False
+
+    @app.route("/tasks/run", methods=["POST"])
+    @csrf.exempt
+    def run_queued_tasks():
+        if not _verify_tasks_caller():
+            return jsonify({"error": "Unauthorized task caller."}), 401
+
+        kind = (request.args.get("kind") or (request.get_json(silent=True) or {}).get("kind") or "").strip()
+        kinds_to_run = [kind] if kind in Job.KINDS else list(Job.KINDS)
+
+        job_queue.recover_stale()
+        processed = 0
+        for k in kinds_to_run:
+            processed += job_queue.run_due(k, time_budget_sec=500.0)
+
+        return jsonify({"ok": True, "processed": processed})
+
     # -------------------------------------------------------------------------
     # My Binder (Private, Row-Level Scoped) & HTMX Status Routes
     # -------------------------------------------------------------------------
@@ -798,44 +761,86 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     @login_required
     def binder_view():
         user = get_current_user()
-        active_filter = (request.args.get("filter") or "all").strip().lower()
-        if active_filter not in ("all", "recent", "dupes", "for_trade", "meeple_bound"):
-            active_filter = "all"
-        search_q = (request.args.get("q") or "").strip()
-        color_filter = (request.args.get("color") or "all").strip().lower()
-        type_filter = (request.args.get("type") or "all").strip().lower()
-        finish_filter = (request.args.get("finish") or "all").strip().lower()
-        sort_mode = (request.args.get("sort") or "default").strip().lower()
-        group_by = (request.args.get("group") or "none").strip().lower()
-        view_mode = (request.args.get("view") or "rows").strip().lower()
+        f = queries.CardFilters.from_request(request.args, scope="binder")
 
-        items, oracle_dupe_map = _query_user_binder(
-            user.id,
-            active_filter=active_filter,
-            search_q=search_q,
-            color_filter=color_filter,
-            type_filter=type_filter,
-            finish_filter=finish_filter,
-            sort_mode=sort_mode,
+        base_query = (
+            BinderItem.query.join(Card, BinderItem.scryfall_id == Card.scryfall_id)
+            .options(db.joinedload(BinderItem.card))
         )
-        stats = _compute_binder_stats(user.id)
+        filtered_query = queries.apply_card_filters(base_query, f, scope="binder", user_id=user.id)
+        items, has_more = queries.paginate(filtered_query, f.page, per_page=60)
+
+        page_oracle_ids = [item.card.oracle_id for item in items if item.card]
+        oracle_dupe_map = queries.compute_oracle_dupe_map(user.id, oracle_ids=page_oracle_ids)
+        pending_ids = job_queue.pending_ref_ids("meeple_lookup", [item.id for item in items])
+
+        last_group_key = ""
+        if items and f.group != "none":
+            last_group_key = queries.group_key_and_label(items[-1], f.group)[0]
+
+        next_page_url = (
+            url_for("binder_view", **f.to_query_params("binder", page=f.page + 1, prev_group=last_group_key))
+            if has_more
+            else ""
+        )
+
+        is_hx = bool(request.headers.get("HX-Request"))
+        if is_hx and f.page > 1:
+            return render_template(
+                "partials/binder_list.html",
+                items=items,
+                oracle_dupe_map=oracle_dupe_map,
+                active_filter=f.status,
+                search_q=f.q,
+                color_filter=f.color,
+                type_filter=f.type,
+                finish_filter=f.finish,
+                sort_mode=f.sort,
+                group_by=f.group,
+                view_mode=f.view,
+                has_more=has_more,
+                next_page_url=next_page_url,
+                prev_group=f.prev_group,
+                page_only=True,
+                group_key_and_label_fn=queries.group_key_and_label,
+                is_pending_fn=lambda item_id: item_id in pending_ids,
+            )
+
+        stats = queries.compute_binder_stats_sql(user.id)
+        if f.status == "all" and not f.q and f.color == "all" and f.type == "all" and f.finish == "all":
+            total_matches = stats["unique_rows"]
+        else:
+            count_q = queries.apply_card_filters(
+                db.session.query(func.count(BinderItem.id)).join(Card, BinderItem.scryfall_id == Card.scryfall_id),
+                f,
+                scope="binder",
+                user_id=user.id,
+                apply_order=False,
+            )
+            total_matches = int(count_q.scalar() or 0)
 
         context = {
             "items": items,
             "oracle_dupe_map": oracle_dupe_map,
             "stats": stats,
-            "active_filter": active_filter,
-            "search_q": search_q,
-            "color_filter": color_filter,
-            "type_filter": type_filter,
-            "finish_filter": finish_filter,
-            "sort_mode": sort_mode,
-            "group_by": group_by,
-            "view_mode": view_mode,
-            "is_pending_fn": meeple_worker.is_pending,
+            "total_matches": total_matches,
+            "active_filter": f.status,
+            "search_q": f.q,
+            "color_filter": f.color,
+            "type_filter": f.type,
+            "finish_filter": f.finish,
+            "sort_mode": f.sort,
+            "group_by": f.group,
+            "view_mode": f.view,
+            "has_more": has_more,
+            "next_page_url": next_page_url,
+            "prev_group": "",
+            "page_only": False,
+            "group_key_and_label_fn": queries.group_key_and_label,
+            "is_pending_fn": lambda item_id: item_id in pending_ids,
             "active_tab": "binder",
         }
-        if request.headers.get("HX-Request"):
+        if is_hx:
             return render_template("partials/binder_list.html", **context)
         return render_template("binder.html", **context)
 
@@ -870,13 +875,17 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         db.session.commit()
         if new_status in ("for_trade", "meeple_bound") and previous_status != new_status:
-            discord_worker.enqueue([item.id])
-        oracle_dupe_map = _compute_oracle_dupe_map(user.id)
+            delay_sec = float(app.config.get("DISCORD_WEBHOOK_DELAY_SEC", 300))
+            job_queue.enqueue("discord_notify", ref_id=item.id, delay_sec=delay_sec)
+        oracle_dupe_map = queries.compute_oracle_dupe_map(
+            user.id,
+            oracle_ids=[item.card.oracle_id] if item.card else [],
+        )
         return render_template(
             "partials/binder_card_row.html",
             item=item,
             oracle_dupe_map=oracle_dupe_map,
-            is_pending=meeple_worker.is_pending(item.id),
+            is_pending=job_queue.is_pending("meeple_lookup", item.id),
         )
 
     @app.route("/binder/<int:item_id>/refresh-meeple", methods=["POST"])
@@ -900,12 +909,15 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
             item.updated_at = utc_now()
             db.session.commit()
 
-        oracle_dupe_map = _compute_oracle_dupe_map(user.id)
+        oracle_dupe_map = queries.compute_oracle_dupe_map(
+            user.id,
+            oracle_ids=[item.card.oracle_id] if item.card else [],
+        )
         return render_template(
             "partials/binder_card_row.html",
             item=item,
             oracle_dupe_map=oracle_dupe_map,
-            is_pending=meeple_worker.is_pending(item.id),
+            is_pending=job_queue.is_pending("meeple_lookup", item.id),
         )
 
     @app.route("/binder/<int:item_id>/row", methods=["GET"])
@@ -913,12 +925,15 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     def get_item_row(item_id: int):
         user = get_current_user()
         item = BinderItem.query.filter_by(id=item_id, user_id=user.id).first_or_404()
-        oracle_dupe_map = _compute_oracle_dupe_map(user.id)
+        oracle_dupe_map = queries.compute_oracle_dupe_map(
+            user.id,
+            oracle_ids=[item.card.oracle_id] if item.card else [],
+        )
         return render_template(
             "partials/binder_card_row.html",
             item=item,
             oracle_dupe_map=oracle_dupe_map,
-            is_pending=meeple_worker.is_pending(item.id),
+            is_pending=job_queue.is_pending("meeple_lookup", item.id),
         )
 
     @app.route("/binder/<int:item_id>/quantity", methods=["POST"])
@@ -951,12 +966,15 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         item.updated_at = utc_now()
         db.session.commit()
 
-        oracle_dupe_map = _compute_oracle_dupe_map(user.id)
+        oracle_dupe_map = queries.compute_oracle_dupe_map(
+            user.id,
+            oracle_ids=[item.card.oracle_id] if item.card else [],
+        )
         return render_template(
             "partials/binder_card_row.html",
             item=item,
             oracle_dupe_map=oracle_dupe_map,
-            is_pending=meeple_worker.is_pending(item.id),
+            is_pending=job_queue.is_pending("meeple_lookup", item.id),
         )
 
     @app.route("/binder/<int:item_id>", methods=["DELETE"])
@@ -981,27 +999,42 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         if new_status not in BinderItem.VALID_STATUSES:
             return jsonify({"error": f"Invalid status '{new_status}'."}), 400
 
-        raw_ids = request.form.getlist("item_ids") or json_data.get("item_ids") or []
-        if isinstance(raw_ids, str):
-            raw_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
-        item_ids: List[int] = []
-        for val in raw_ids:
-            try:
-                item_ids.append(int(val))
-            except (ValueError, TypeError):
-                pass
+        select_all_raw = str(request.form.get("select_all") or json_data.get("select_all") or "").strip().lower()
+        select_all = select_all_raw in ("1", "true", "yes", "on")
 
-        if not item_ids:
-            if request.is_json:
-                return jsonify({"updated": 0, "queued": 0})
-            flash("Select at least one card first.", "error")
-            return redirect(url_for("binder_view"))
+        if select_all:
+            f = queries.CardFilters.from_request(request.form if not request.is_json else json_data, scope="binder")
+            items_query = queries.apply_card_filters(
+                BinderItem.query.join(Card, BinderItem.scryfall_id == Card.scryfall_id)
+                .options(db.joinedload(BinderItem.card)),
+                f,
+                scope="binder",
+                user_id=user.id,
+                apply_order=False,
+            )
+            items = items_query.all()
+        else:
+            raw_ids = request.form.getlist("item_ids") or json_data.get("item_ids") or []
+            if isinstance(raw_ids, str):
+                raw_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
+            item_ids: List[int] = []
+            for val in raw_ids:
+                try:
+                    item_ids.append(int(val))
+                except (ValueError, TypeError):
+                    pass
 
-        items = (
-            BinderItem.query.options(db.joinedload(BinderItem.card))
-            .filter(BinderItem.user_id == user.id, BinderItem.id.in_(item_ids))
-            .all()
-        )
+            if not item_ids:
+                if request.is_json:
+                    return jsonify({"updated": 0, "queued": 0})
+                flash("Select at least one card first.", "error")
+                return redirect(url_for("binder_view"))
+
+            items = (
+                BinderItem.query.options(db.joinedload(BinderItem.card))
+                .filter(BinderItem.user_id == user.id, BinderItem.id.in_(item_ids))
+                .all()
+            )
 
         now = utc_now()
         ttl = float(app.config.get("MEEPLE_CACHE_TTL_HOURS", 24.0))
@@ -1031,52 +1064,72 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
         db.session.commit()
 
-        queued_count = meeple_worker.enqueue(to_queue) if to_queue else 0
+        queued_count = job_queue.enqueue_many("meeple_lookup", to_queue) if to_queue else 0
         if discord_to_queue:
-            discord_worker.enqueue(discord_to_queue)
+            delay_sec = float(app.config.get("DISCORD_WEBHOOK_DELAY_SEC", 300))
+            job_queue.enqueue_many("discord_notify", discord_to_queue, delay_sec=delay_sec)
 
         if request.is_json:
             return jsonify({"updated": len(items), "queued": queued_count})
 
-        active_filter = (request.form.get("filter") or "all").strip().lower()
-        search_q = (request.form.get("q") or "").strip()
-        color_filter = (request.form.get("color") or "all").strip().lower()
-        type_filter = (request.form.get("type") or "all").strip().lower()
-        finish_filter = (request.form.get("finish") or "all").strip().lower()
-        sort_mode = (request.form.get("sort") or "default").strip().lower()
-        group_by = (request.form.get("group") or "none").strip().lower()
-        view_mode = (request.form.get("view") or "rows").strip().lower()
+        f = queries.CardFilters.from_request(request.form, scope="binder")
 
         if request.headers.get("HX-Request"):
-            updated_items, oracle_dupe_map = _query_user_binder(
-                user.id,
-                active_filter=active_filter,
-                search_q=search_q,
-                color_filter=color_filter,
-                type_filter=type_filter,
-                finish_filter=finish_filter,
-                sort_mode=sort_mode,
+            filtered_query = queries.apply_card_filters(
+                BinderItem.query.join(Card, BinderItem.scryfall_id == Card.scryfall_id)
+                .options(db.joinedload(BinderItem.card)),
+                f,
+                scope="binder",
+                user_id=user.id,
             )
+            updated_items, has_more = queries.paginate(filtered_query, 1, per_page=60)
+            page_oracle_ids = [item.card.oracle_id for item in updated_items if item.card]
+            oracle_dupe_map = queries.compute_oracle_dupe_map(user.id, oracle_ids=page_oracle_ids)
+            pending_ids = job_queue.pending_ref_ids("meeple_lookup", [item.id for item in updated_items])
+            last_group_key = (
+                queries.group_key_and_label(updated_items[-1], f.group)[0]
+                if updated_items and f.group != "none"
+                else ""
+            )
+            next_page_url = (
+                url_for("binder_view", **f.to_query_params("binder", page=2, prev_group=last_group_key))
+                if has_more
+                else ""
+            )
+            count_q = queries.apply_card_filters(
+                db.session.query(func.count(BinderItem.id)).join(Card, BinderItem.scryfall_id == Card.scryfall_id),
+                f,
+                scope="binder",
+                user_id=user.id,
+                apply_order=False,
+            )
+            total_matches = int(count_q.scalar() or 0)
             return render_template(
                 "partials/binder_list.html",
                 items=updated_items,
                 oracle_dupe_map=oracle_dupe_map,
-                active_filter=active_filter,
-                search_q=search_q,
-                color_filter=color_filter,
-                type_filter=type_filter,
-                finish_filter=finish_filter,
-                sort_mode=sort_mode,
-                group_by=group_by,
-                view_mode=view_mode,
-                is_pending_fn=meeple_worker.is_pending,
+                total_matches=total_matches,
+                active_filter=f.status,
+                search_q=f.q,
+                color_filter=f.color,
+                type_filter=f.type,
+                finish_filter=f.finish,
+                sort_mode=f.sort,
+                group_by=f.group,
+                view_mode=f.view,
+                has_more=has_more,
+                next_page_url=next_page_url,
+                prev_group="",
+                page_only=False,
+                group_key_and_label_fn=queries.group_key_and_label,
+                is_pending_fn=lambda item_id: item_id in pending_ids,
             )
 
         msg = f"Updated {len(items)} card(s) to {new_status.replace('_', ' ').title()}."
         if queued_count:
             msg += f" Queued {queued_count} Mighty Meeple lookup(s) with polite pacing."
         flash(msg, "success")
-        return redirect(url_for("binder_view", filter=active_filter, q=search_q))
+        return redirect(url_for("binder_view", filter=f.status, q=f.q))
 
     # -------------------------------------------------------------------------
     # Pod Feed (Shared across Pod Members — Public Items Only)
@@ -1085,104 +1138,56 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
     @app.route("/pod")
     @login_required
     def pod_feed():
-        status_filter = (request.args.get("status") or "all").strip().lower()
-        if status_filter not in ("all", "meeple_bound", "for_trade"):
-            status_filter = "all"
+        f = queries.CardFilters.from_request(request.args, scope="pod")
 
-        owner_id_raw = request.args.get("owner_id", "").strip()
-        owner_id: Optional[int] = None
-        if owner_id_raw:
-            try:
-                owner_id = int(owner_id_raw)
-            except (ValueError, TypeError):
-                owner_id = None
-
-        search_q = (request.args.get("q") or "").strip()
-        color_filter = (request.args.get("color") or "all").strip().lower()
-        type_filter = (request.args.get("type") or "all").strip().lower()
-        finish_filter = (request.args.get("finish") or "all").strip().lower()
-        sort_mode = (request.args.get("sort") or "default").strip().lower()
-        group_by = (request.args.get("group") or "none").strip().lower()
-        view_mode = (request.args.get("view") or "rows").strip().lower()
-
-        query = (
+        base_query = (
             BinderItem.query.join(User, BinderItem.user_id == User.id)
             .join(Card, BinderItem.scryfall_id == Card.scryfall_id)
             .options(db.joinedload(BinderItem.user), db.joinedload(BinderItem.card))
-            .filter(BinderItem.status.in_(["for_trade", "meeple_bound"]))
+        )
+        filtered_query = queries.apply_card_filters(base_query, f, scope="pod")
+        items, has_more = queries.paginate(filtered_query, f.page, per_page=60)
+
+        last_group_key = ""
+        if items and f.group != "none":
+            last_group_key = queries.group_key_and_label(items[-1], f.group)[0]
+
+        next_page_url = (
+            url_for("pod_feed", **f.to_query_params("pod", page=f.page + 1, prev_group=last_group_key))
+            if has_more
+            else ""
         )
 
-        if status_filter in ("meeple_bound", "for_trade"):
-            query = query.filter(BinderItem.status == status_filter)
-        if owner_id is not None:
-            query = query.filter(BinderItem.user_id == owner_id)
-        if search_q:
-            like_term = f"%{search_q}%"
-            query = query.filter(
-                or_(
-                    Card.name.ilike(like_term),
-                    Card.set_code.ilike(like_term),
-                    Card.type_line.ilike(like_term),
-                    User.display_name.ilike(like_term),
-                )
+        is_hx = bool(request.headers.get("HX-Request"))
+        if is_hx and f.page > 1:
+            return render_template(
+                "partials/pod_feed_list.html",
+                items=items,
+                status_filter=f.status,
+                selected_owner_id=f.owner_id,
+                search_q=f.q,
+                color_filter=f.color,
+                type_filter=f.type,
+                finish_filter=f.finish,
+                sort_mode=f.sort,
+                group_by=f.group,
+                view_mode=f.view,
+                has_more=has_more,
+                next_page_url=next_page_url,
+                prev_group=f.prev_group,
+                page_only=True,
+                group_key_and_label_fn=queries.group_key_and_label,
             )
 
-        # Finish filter
-        finish_norm = finish_filter.strip().lower()
-        if finish_norm in ("foil", "etched"):
-            query = query.filter(BinderItem.finish == finish_norm)
-        elif finish_norm in ("nonfoil", "normal"):
-            query = query.filter(BinderItem.finish == "nonfoil")
-        elif finish_norm == "special":
-            query = query.filter(BinderItem.finish.in_(["foil", "etched"]))
-
-        # Card Type filter
-        t_clean = type_filter.strip().lower()
-        if t_clean and t_clean != "all":
-            if t_clean in ("creature", "instant", "sorcery", "artifact", "enchantment", "planeswalker", "land"):
-                query = query.filter(Card.type_line.ilike(f"%{t_clean}%"))
-            elif t_clean == "other":
-                query = query.filter(
-                    ~Card.type_line.ilike("%creature%"),
-                    ~Card.type_line.ilike("%instant%"),
-                    ~Card.type_line.ilike("%sorcery%"),
-                    ~Card.type_line.ilike("%artifact%"),
-                    ~Card.type_line.ilike("%enchantment%"),
-                    ~Card.type_line.ilike("%planeswalker%"),
-                    ~Card.type_line.ilike("%land%"),
-                )
-
-        # Sorting
-        s_clean = sort_mode.strip().lower()
-        if s_clean == "price_desc":
-            query = query.order_by(func.coalesce(Card.usd_price, 0).desc(), Card.name.asc())
-        elif s_clean == "price_asc":
-            query = query.order_by(func.coalesce(Card.usd_price, 999999).asc(), Card.name.asc())
-        elif s_clean == "total_value_desc":
-            query = query.order_by((func.coalesce(Card.usd_price, 0) * BinderItem.quantity).desc(), Card.name.asc())
-        elif s_clean == "meeple_credit_desc":
-            query = query.order_by(func.coalesce(BinderItem.mm_buylist_credit, 0).desc(), Card.name.asc())
-        elif s_clean == "name_asc":
-            query = query.order_by(Card.name.asc(), Card.set_code.asc())
-        elif s_clean == "name_desc":
-            query = query.order_by(Card.name.desc(), Card.set_code.asc())
-        elif s_clean == "cmc_asc":
-            query = query.order_by(func.coalesce(Card.cmc, 0).asc(), Card.name.asc())
-        elif s_clean == "qty_desc":
-            query = query.order_by(BinderItem.quantity.desc(), Card.name.asc())
-        elif s_clean == "set_asc":
-            query = query.order_by(Card.set_code.asc(), Card.collector_number.asc())
-        else:
-            # Default: Put Meeple Bound cards first because they are about to leave the playgroup
-            priority_order = case((BinderItem.status == "meeple_bound", 0), else_=1)
-            query = query.order_by(priority_order, BinderItem.updated_at.desc(), BinderItem.id.desc())
-
-        items = query.all()
-
-        # Color filter (python-level)
-        c_clean = color_filter.strip().lower()
-        if c_clean and c_clean != "all":
-            items = [item for item in items if item.color_bucket.lower() == c_clean]
+        count_q = queries.apply_card_filters(
+            db.session.query(func.count(BinderItem.id))
+            .join(User, BinderItem.user_id == User.id)
+            .join(Card, BinderItem.scryfall_id == Card.scryfall_id),
+            f,
+            scope="pod",
+            apply_order=False,
+        )
+        total_matches = int(count_q.scalar() or 0)
 
         pod_owners = (
             db.session.query(User)
@@ -1196,18 +1201,24 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         context = {
             "items": items,
             "pod_owners": pod_owners,
-            "status_filter": status_filter,
-            "selected_owner_id": owner_id,
-            "search_q": search_q,
-            "color_filter": color_filter,
-            "type_filter": type_filter,
-            "finish_filter": finish_filter,
-            "sort_mode": sort_mode,
-            "group_by": group_by,
-            "view_mode": view_mode,
+            "total_matches": total_matches,
+            "status_filter": f.status,
+            "selected_owner_id": f.owner_id,
+            "search_q": f.q,
+            "color_filter": f.color,
+            "type_filter": f.type,
+            "finish_filter": f.finish,
+            "sort_mode": f.sort,
+            "group_by": f.group,
+            "view_mode": f.view,
+            "has_more": has_more,
+            "next_page_url": next_page_url,
+            "prev_group": "",
+            "page_only": False,
+            "group_key_and_label_fn": queries.group_key_and_label,
             "active_tab": "pod",
         }
-        if request.headers.get("HX-Request"):
+        if is_hx:
             return render_template("partials/pod_feed_list.html", **context)
         return render_template("pod_feed.html", **context)
 
@@ -1366,7 +1377,12 @@ def create_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
         db.session.add(imp)
         db.session.commit()
 
-        drive_worker.enqueue(imp.id, access_token)
+        job_queue.enqueue(
+            "drive_import",
+            ref_id=imp.id,
+            payload={"access_token": access_token},
+            deduplicate=False,
+        )
         return render_template(
             "partials/drive_import_status.html",
             imp=imp,

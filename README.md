@@ -156,6 +156,31 @@ Example `mcp_config.json` entry:
 
 ---
 
+## ☁️ Cloud Run + Cloud Tasks Setup (Scale-to-Zero Durable Jobs)
+
+To keep Cloud Run at zero idle cost while ensuring Mighty Meeple lookups, 5-minute Discord batches, and Google Drive imports never get lost when instances scale to zero:
+
+```bash
+gcloud tasks queues create vaultswap-jobs --location=us-east1 \
+  --max-concurrent-dispatches=1 --max-attempts=5 --min-backoff=30s
+
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member=serviceAccount:$RUN_SA --role=roles/cloudtasks.enqueuer
+
+gcloud iam service-accounts add-iam-policy-binding $RUN_SA \
+  --member=serviceAccount:$RUN_SA --role=roles/iam.serviceAccountUser
+
+gcloud run services add-iam-policy-binding vaultswap \
+  --member=serviceAccount:$RUN_SA --role=roles/run.invoker
+```
+
+Set these environment variables on your Cloud Run service:
+- `CLOUD_TASKS_QUEUE=projects/<PROJECT>/locations/us-east1/queues/vaultswap-jobs`
+- `TASKS_INVOKER_SA=<RUN_SA>`
+- `APP_BASE_URL=https://<your-service>.run.app`
+
+---
+
 ## 🧪 Testing
 
 Run the full pytest suite:

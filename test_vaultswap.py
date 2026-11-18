@@ -26,6 +26,8 @@ def app():
         "GOOGLE_CLIENT_SECRET": "",
         "DEV_LOGIN_ENABLED": True,
         "INVITE_ONLY": False,
+        "WTF_CSRF_ENABLED": False,
+        "JOB_DISPATCHER": "inline",
         "MEEPLE_CACHE_TTL_HOURS": 24.0,
         "MEEPLE_RATE_LIMIT_MIN_SEC": 1.5,
         "MEEPLE_RATE_LIMIT_MAX_SEC": 2.0,
@@ -403,7 +405,7 @@ def test_bulk_status_worker_rate_limit_guard_and_pod_cache(app, client):
         def fake_sleep(seconds):
             sleep_calls.append(seconds)
 
-        with patch("services.time.sleep", side_effect=fake_sleep), \
+        with patch("jobs.time.sleep", side_effect=fake_sleep), \
              patch.object(
                  MightyMeepleProvider,
                  "get_card_snapshot",
@@ -424,7 +426,8 @@ def test_bulk_status_worker_rate_limit_guard_and_pod_cache(app, client):
             # i1 hit pod cache synchronously, only i2 & i3 were queued
             assert payload["queued"] == 2
 
-            assert app.meeple_worker.wait_until_idle(timeout=5.0)
+            processed = app.job_queue.run_due("meeple_lookup")
+            assert processed == 2
             assert mm_mock.call_count == 2  # i2 and i3 only!
             # Polite 1.5s-2.0s jittered delay applied before second live request
             assert len(sleep_calls) == 1
@@ -1446,15 +1449,31 @@ def test_mcp_traders_and_summary_and_resources(app, client):
 
 
 def test_unified_asgi_app_routing_and_mcp_endpoint(app, client):
+    import hashlib
     from starlette.testclient import TestClient
     import asgi
+    from models import ApiToken
 
-    with TestClient(asgi.asgi_app) as tc:
+    with app.app_context():
+        u = _login_user(client, "asgi_mcp@pod.local", "AsgiUser")
+        raw_tok = "vs_test_asgi_token_12345"
+        db.session.add(
+            ApiToken(
+                user_id=u.id,
+                label="Test",
+                token_hash=hashlib.sha256(raw_tok.encode("utf-8")).hexdigest(),
+                token_prefix=raw_tok[:10],
+            )
+        )
+        db.session.commit()
+
+    wrapped = asgi.create_asgi_app(app)
+    with TestClient(wrapped) as tc:
         # Flask web UI route still functions normally
         res_flask = tc.get("/login")
         assert res_flask.status_code == 200
 
-        # MCP Streamable HTTP endpoint handles MCP JSON-RPC initialize handshake
+        # MCP Streamable HTTP endpoint rejects unauthenticated requests
         init_payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -1465,7 +1484,14 @@ def test_unified_asgi_app_routing_and_mcp_endpoint(app, client):
                 "clientInfo": {"name": "GeminiMobileApp", "version": "1.0"},
             },
         }
-        res_mcp = tc.post("/mcp", json=init_payload)
+        assert tc.post("/mcp", json=init_payload).status_code == 401
+
+        # Authenticated MCP request succeeds
+        res_mcp = tc.post(
+            "/mcp",
+            json=init_payload,
+            headers={"Authorization": f"Bearer {raw_tok}"},
+        )
         assert res_mcp.status_code == 200
         assert "capabilities" in res_mcp.text
 
@@ -1658,16 +1684,12 @@ def test_discord_webhook_profile_configuration_and_validation(app, client):
 
         # Test webhook endpoint
         sent_calls = []
-        with patch.object(
-            app.discord_worker,
-            "sender_fn",
-            side_effect=lambda url, payload: (sent_calls.append((url, payload)) or True),
-        ):
-            test_resp = client.post("/profile/test-webhook", follow_redirects=True)
-            assert test_resp.status_code == 200
-            assert len(sent_calls) == 1
-            assert sent_calls[0][0] == valid_hook
-            assert "VaultSwap Discord Webhook Connected" in sent_calls[0][1]["content"]
+        app.discord_sender_fn = lambda url, payload: (sent_calls.append((url, payload)) or True)
+        test_resp = client.post("/profile/test-webhook", follow_redirects=True)
+        assert test_resp.status_code == 200
+        assert len(sent_calls) == 1
+        assert sent_calls[0][0] == valid_hook
+        assert "VaultSwap Discord Webhook Connected" in sent_calls[0][1]["content"]
 
         # Clear webhook URL
         clear_resp = client.post(
@@ -1767,28 +1789,32 @@ def test_discord_webhook_batches_and_posts_after_delay(app, client):
             dispatched.append((url, payload))
             return True
 
-        with patch.object(app.discord_worker, "sender_fn", side_effect=fake_sender):
-            # 1. Alice lists Rhystic Study for trade
-            resp1 = client.post(f"/binder/{i1.id}/status", data={"status": "for_trade"})
-            assert resp1.status_code == 200
+        app.discord_sender_fn = fake_sender
+        # 1. Alice lists Rhystic Study for trade
+        resp1 = client.post(f"/binder/{i1.id}/status", data={"status": "for_trade"})
+        assert resp1.status_code == 200
 
-            # 2. Alice bulk-lists Smothering Tithe and Sol Ring for meeple_bound
-            resp2 = client.post(
-                "/binder/bulk-status",
-                json={"status": "meeple_bound", "item_ids": [i2.id, i3.id]},
-            )
-            assert resp2.status_code == 200
+        # 2. Alice bulk-lists Smothering Tithe and Sol Ring for meeple_bound
+        resp2 = client.post(
+            "/binder/bulk-status",
+            json={"status": "meeple_bound", "item_ids": [i2.id, i3.id]},
+        )
+        assert resp2.status_code == 200
 
-            # 3. Before the 5-minute window elapses, Alice reverts Sol Ring back to private
-            resp3 = client.post(f"/binder/{i3.id}/status", data={"status": "private"})
-            assert resp3.status_code == 200
+        # 3. Before the 5-minute window elapses, Alice reverts Sol Ring back to private
+        resp3 = client.post(f"/binder/{i3.id}/status", data={"status": "private"})
+        assert resp3.status_code == 200
 
-            # Should still be pending before timer expires
-            assert len(dispatched) == 0
-            assert app.discord_worker.pending_count() == 3
+        # Should still be pending before timer expires
+        assert len(dispatched) == 0
+        assert app.job_queue.pending_count("discord_notify") == 3
+        assert app.job_queue.run_due("discord_notify") == 0
+        assert len(dispatched) == 0
 
-            # Wait for timer window to elapse and dispatch
-            assert app.discord_worker.wait_until_idle(timeout=5.0)
+        # Wait for timer window to elapse and dispatch
+        import time as _time
+        _time.sleep(0.2)
+        assert app.job_queue.run_due("discord_notify") == 3
 
         # Delivered once to hook_alice and once to hook_bob (deduplicated across Bob & Carol)
         assert len(dispatched) == 2
@@ -1806,6 +1832,326 @@ def test_discord_webhook_batches_and_posts_after_delay(app, client):
         assert "$23.40 Cr" in embed_desc
         # Sol Ring was reverted to private before timer fired, so it must NOT be posted
         assert "Sol Ring" not in embed_desc
+
+
+# =============================================================================
+# Security, Durable Job Queue, and 22k-Card Pagination Tests (S1-S4, U1)
+# =============================================================================
+
+def test_s1_mcp_api_token_auth_and_lifecycle(app, client):
+    """Verifies /mcp requires a valid non-revoked ApiToken (Bearer or ?key=) and tokens are hashed."""
+    from starlette.testclient import TestClient
+    import asgi
+    from models import ApiToken
+
+    with app.app_context():
+        _login_user(client, "mcp_owner@pod.local", "McpOwner")
+        tok_resp = client.post("/profile/api-tokens", json={"label": "Phone"})
+        assert tok_resp.status_code == 200
+        tok_data = tok_resp.get_json()
+        raw_token = tok_data["token"]
+        tok_id = tok_data["id"]
+
+        # Plaintext must not be stored in DB
+        db_tok = db.session.get(ApiToken, tok_id)
+        assert db_tok is not None
+        assert db_tok.token_hash != raw_token
+        assert raw_token not in repr(db_tok)
+
+    init_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "GeminiMobileApp", "version": "1.0"},
+        },
+    }
+
+    wrapped = asgi.create_asgi_app(app)
+    with TestClient(wrapped) as tc:
+        # Missing / bad token -> 401
+        assert tc.post("/mcp", json=init_payload).status_code == 401
+        assert tc.post("/mcp", json=init_payload, headers={"Authorization": "Bearer wrong"}).status_code == 401
+        assert tc.post("/mcp?key=wrong", json=init_payload).status_code == 401
+
+        # Valid Bearer -> 200
+        res_bearer = tc.post("/mcp", json=init_payload, headers={"Authorization": f"Bearer {raw_token}"})
+        assert res_bearer.status_code == 200
+
+        # Valid ?key= -> 200 with Cache-Control: no-store
+        res_key = tc.post(f"/mcp?key={raw_token}", json=init_payload)
+        assert res_key.status_code == 200
+        assert res_key.headers.get("cache-control") == "no-store"
+
+        # Revoke token -> 401
+        rev_resp = client.post(f"/profile/api-tokens/{tok_id}/revoke", json={})
+        assert rev_resp.status_code == 200
+        assert tc.post("/mcp", json=init_payload, headers={"Authorization": f"Bearer {raw_token}"}).status_code == 401
+
+
+def test_s2_csrf_protection_and_htmx_headers():
+    """Verifies Flask-WTF CSRF blocks raw POSTs without a token and allows HTMX X-CSRFToken."""
+    import re
+
+    csrf_app = create_app({
+        "TESTING": True,
+        "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+        "SECRET_KEY": "csrf-test-secret",
+        "GOOGLE_CLIENT_ID": "",
+        "DEV_LOGIN_ENABLED": True,
+        "INVITE_ONLY": False,
+        "WTF_CSRF_ENABLED": True,
+        "JOB_DISPATCHER": "inline",
+    })
+    with csrf_app.app_context():
+        db.create_all()
+        c = csrf_app.test_client()
+
+        # Login page has CSRF token
+        login_html = c.get("/login").get_data(as_text=True)
+        m = re.search(r'name="csrf_token"\s+value="([^"]+)"', login_html)
+        assert m is not None
+        csrf_tok = m.group(1)
+
+        # POST without CSRF token fails with 400
+        bad = c.post("/auth/dev-login", data={"email": "csrf@pod.local", "display_name": "CsrfUser"})
+        assert bad.status_code == 400
+
+        # POST with CSRF token succeeds
+        ok = c.post(
+            "/auth/dev-login",
+            data={"email": "csrf@pod.local", "display_name": "CsrfUser", "csrf_token": csrf_tok},
+            follow_redirects=False,
+        )
+        assert ok.status_code == 302
+
+        # Rendered base.html has meta tag and hx-headers
+        binder_html = c.get("/binder").get_data(as_text=True)
+        assert '<meta name="csrf-token"' in binder_html
+        assert 'hx-headers=' in binder_html
+
+        # HTMX POST with X-CSRFToken succeeds
+        user = User.query.filter_by(email="csrf@pod.local").one()
+        card = _make_card("Opt", "XLN", "65")
+        item = BinderItem(user_id=user.id, scryfall_id=card.scryfall_id, status="private")
+        db.session.add(item)
+        db.session.commit()
+
+        m2 = re.search(r'<meta name="csrf-token" content="([^"]+)"', binder_html)
+        assert m2 is not None
+        page_csrf = m2.group(1)
+
+        assert c.post(f"/binder/{item.id}/status", data={"status": "for_trade"}).status_code == 400
+        htmx_ok = c.post(
+            f"/binder/{item.id}/status",
+            data={"status": "for_trade"},
+            headers={"X-CSRFToken": page_csrf},
+        )
+        assert htmx_ok.status_code == 200
+        db.drop_all()
+
+
+def test_s3_secret_key_required_in_production():
+    """Verifies create_app refuses to start without SECRET_KEY when dev login is disabled."""
+    with pytest.raises(RuntimeError, match="SECRET_KEY"):
+        create_app({
+            "TESTING": False,
+            "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+            "SECRET_KEY": "",
+            "GOOGLE_CLIENT_ID": "real-client-id",
+            "DEV_LOGIN_ENABLED": False,
+        })
+
+
+def test_s4_durable_jobs_retry_stale_recovery_token_wipe_and_tasks_endpoint(app, client):
+    """Verifies stale recovery, retry/fail backoff, Drive token wipe, /tasks/run auth, and CloudTasks dedupe."""
+    from models import DriveImport, Job
+    import jobs as jobs_mod
+
+    with app.app_context():
+        u = _login_user(client, "jobs@pod.local", "JobsUser")
+        c1 = _make_card("Force of Will", "DMR", "50")
+        item = BinderItem(user_id=u.id, scryfall_id=c1.scryfall_id, status="for_trade")
+        db.session.add(item)
+        db.session.commit()
+
+        # 1. Stale recovery
+        stale_job = Job(
+            kind="meeple_lookup",
+            ref_id=item.id,
+            status="running",
+            attempts=1,
+            max_attempts=3,
+            locked_at=utc_now() - timedelta(minutes=45),
+        )
+        db.session.add(stale_job)
+        db.session.commit()
+        assert app.job_queue.recover_stale(stale_minutes=35) == 1
+        assert db.session.get(Job, stale_job.id).status == "pending"
+
+        # 2. Retry with backoff then mark failed after max_attempts
+        stale_job.max_attempts = 2
+        db.session.commit()
+        app.meeple_provider_factory = lambda: MagicMock(get_card_snapshot=MagicMock(side_effect=RuntimeError("boom")))
+        app.job_queue.run_due("meeple_lookup")
+        j = db.session.get(Job, stale_job.id)
+        assert j.status == "failed"
+        assert j.attempts == 2
+        assert "boom" in (j.last_error or "")
+
+        # 3. Drive import wipes access_token payload on completion
+        imp = DriveImport(user_id=u.id, drive_file_id="f1", file_name="test.csv", status="queued")
+        db.session.add(imp)
+        db.session.commit()
+        drive_job = app.job_queue.enqueue("drive_import", ref_id=imp.id, payload={"access_token": "secret-tok"}, deduplicate=False)
+        assert drive_job.payload is not None
+        with patch("drive_sync.run_drive_import", return_value=None):
+            assert app.job_queue.run_due("drive_import") == 1
+        assert db.session.get(Job, drive_job.id).status == "done"
+        assert db.session.get(Job, drive_job.id).payload is None
+
+        # 4. /tasks/run rejects unauthenticated, accepts valid OIDC or shared secret
+        assert client.post("/tasks/run").status_code == 401
+        app.config["TASKS_SHARED_SECRET"] = "local-secret"
+        assert client.post("/tasks/run", headers={"X-Tasks-Secret": "local-secret"}).status_code == 200
+
+        app.config["TASKS_SHARED_SECRET"] = ""
+        app.config["TASKS_INVOKER_SA"] = "invoker@proj.iam.gserviceaccount.com"
+        app.config["APP_BASE_URL"] = "https://vaultswap.run.app"
+        with patch("google.oauth2.id_token.verify_oauth2_token", return_value={"email": "invoker@proj.iam.gserviceaccount.com", "email_verified": True}):
+            res_oidc = client.post("/tasks/run", headers={"Authorization": "Bearer fake-oidc"})
+            assert res_oidc.status_code == 200
+
+        # 5. CloudTasksDispatcher deduplicates task names and ignores AlreadyExists
+        class AlreadyExistsErr(Exception):
+            pass
+
+        mock_client = MagicMock()
+        mock_client.create_task.side_effect = [None, AlreadyExistsErr("AlreadyExists")]
+        disp = jobs_mod.CloudTasksDispatcher(
+            queue_path="projects/p/locations/us-east1/queues/q",
+            target_url="https://vaultswap.run.app/tasks/run",
+            invoker_sa="invoker@proj.iam.gserviceaccount.com",
+            client_factory=lambda: mock_client,
+        )
+        now = utc_now()
+        disp.notify("meeple_lookup", now)
+        disp.notify("meeple_lookup", now)
+        assert mock_client.create_task.call_count == 2
+        name1 = mock_client.create_task.call_args_list[0].kwargs["task"]["name"]
+        name2 = mock_client.create_task.call_args_list[1].kwargs["task"]["name"]
+        assert name1 == name2
+
+
+def test_u1_pagination_sql_color_grouping_views_stats_and_select_all(app, client):
+    """Verifies 60-item pagination, SQL color filter/grouping across pages, single-view render, SQL stats, and select_all."""
+    import queries
+    from sqlalchemy import event as sa_event
+
+    with app.app_context():
+        alice = _login_user(client, "u1_alice@pod.local", "Alice")
+        bob = User(google_sub="sub-u1-bob", email="u1_bob@pod.local", display_name="Bob")
+        db.session.add(bob)
+        db.session.flush()
+
+        # Seed 500 items for Alice (250 White, 250 Blue) and 5 for Bob
+        cards = []
+        for idx in range(500):
+            is_white = idx < 250
+            c = Card(
+                scryfall_id=str(uuid.uuid4()),
+                oracle_id=str(uuid.uuid4()),
+                name=f"Card {idx:03d}",
+                set_code="TST",
+                collector_number=str(idx + 1),
+                type_line="Creature — Human" if is_white else "Instant",
+                mana_cost="{W}" if is_white else "{U}",
+                colors="W" if is_white else "U",
+                usd_price=2.00,
+                usd_foil_price=5.00,
+            )
+            cards.append(c)
+        db.session.add_all(cards)
+        db.session.flush()
+
+        items = []
+        for idx, c in enumerate(cards):
+            items.append(
+                BinderItem(
+                    user_id=alice.id,
+                    scryfall_id=c.scryfall_id,
+                    quantity=2 if idx % 10 == 0 else 1,
+                    finish="foil" if idx % 5 == 0 else "nonfoil",
+                    status="for_trade" if idx == 0 else "private",
+                )
+            )
+        # Bob's card must never be touched by Alice's select_all
+        bob_item = BinderItem(user_id=bob.id, scryfall_id=cards[0].scryfall_id, status="private")
+        db.session.add_all(items + [bob_item])
+        db.session.commit()
+
+        # 1. Page 1 returns 60 items + sentinel; Page 9 returns 20 items and no sentinel
+        p1 = client.get("/binder?page=1")
+        assert p1.status_code == 200
+        html1 = p1.get_data(as_text=True)
+        assert html1.count('id="binder-row-') == 60
+        assert 'hx-trigger="revealed"' in html1
+        assert "Showing 60 of 500 card(s)" in html1
+        # Only active view ('rows') rendered — no art grid or checklist
+        assert 'id="binder-art-grid"' not in html1
+        assert 'id="binder-checklist"' not in html1
+
+        p9 = client.get("/binder?page=9", headers={"HX-Request": "true"})
+        assert p9.status_code == 200
+        html9 = p9.get_data(as_text=True)
+        assert html9.count('id="binder-row-') == 20
+        assert 'hx-trigger="revealed"' not in html9
+
+        # 2. Active view switcher renders only requested view
+        art_html = client.get("/binder?view=art").get_data(as_text=True)
+        assert 'id="binder-art-grid"' in art_html
+        assert 'id="binder-rows-container"' not in art_html
+
+        # 3. SQL color filter + cross-page color grouping (prev_group avoids duplicate header)
+        w_html = client.get("/binder?color=w").get_data(as_text=True)
+        assert "Showing 60 of 250 card(s)" in w_html
+
+        g1_html = client.get("/binder?group=color&page=1").get_data(as_text=True)
+        assert "White (W)" in g1_html
+        g2_html = client.get("/binder?group=color&page=2&prev_group=W", headers={"HX-Request": "true"}).get_data(as_text=True)
+        assert "White (W)" not in g2_html
+
+        # 4. SQL stats match expected values
+        stats = queries.compute_binder_stats_sql(alice.id)
+        assert stats["unique_rows"] == 500
+        assert stats["total_cards"] == 550  # 500 + 50 extra qty
+        assert stats["for_trade_qty"] == 2
+
+        # 5. Constant query count per page (no N+1)
+        q_count = 0
+
+        def _count_q(*args, **kwargs):
+            nonlocal q_count
+            q_count += 1
+
+        sa_event.listen(db.engine, "before_cursor_execute", _count_q)
+        try:
+            client.get("/binder?page=2", headers={"HX-Request": "true"})
+        finally:
+            sa_event.remove(db.engine, "before_cursor_execute", _count_q)
+        assert q_count <= 8
+
+        # 6. select_all=1 bulk updates only Alice's matching filtered cards
+        bulk_resp = client.post(
+            "/binder/bulk-status",
+            json={"select_all": "1", "color": "u", "status": "for_trade"},
+        )
+        assert bulk_resp.status_code == 200
+        assert bulk_resp.get_json()["updated"] == 250
+        assert db.session.get(BinderItem, bob_item.id).status == "private"
+
 
 
 

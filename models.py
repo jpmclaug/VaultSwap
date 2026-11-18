@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import Numeric, Text, Boolean, Integer, String, DateTime, ForeignKey, Index, desc, text
+from sqlalchemy import Numeric, Text, Boolean, Integer, String, DateTime, ForeignKey, Index, desc, event, text
 from sqlalchemy.orm import validates
 from sqlalchemy.types import TypeDecorator, Uuid
 
@@ -70,6 +70,12 @@ class User(db.Model):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    api_tokens = db.relationship(
+        "ApiToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     @property
     def is_pending(self) -> bool:
@@ -106,6 +112,8 @@ class Card(db.Model):
     cmc = db.Column(Numeric(6, 2), nullable=True)
     usd_price = db.Column(Numeric(10, 2), nullable=True)
     usd_foil_price = db.Column(Numeric(10, 2), nullable=True)
+    color_bucket_col = db.Column("color_bucket", String(12), nullable=True, index=True)
+    primary_type_col = db.Column("primary_type", String(15), nullable=True, index=True)
     scryfall_updated_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     binder_items = db.relationship("BinderItem", back_populates="card")
@@ -117,8 +125,7 @@ class Card(db.Model):
             return self.usd_foil_price if self.usd_foil_price is not None else self.usd_price
         return self.usd_price if self.usd_price is not None else self.usd_foil_price
 
-    @property
-    def primary_card_type(self) -> str:
+    def compute_primary_card_type(self) -> str:
         """Categorizes card into canonical store/binder section based on type_line."""
         tl = (self.type_line or "").lower()
         if "creature" in tl:
@@ -140,6 +147,11 @@ class Card(db.Model):
         return "Other"
 
     @property
+    def primary_card_type(self) -> str:
+        """Returns persisted primary card type or computes from type_line."""
+        return self.primary_type_col or self.compute_primary_card_type()
+
+    @property
     def short_type_line(self) -> str:
         """Returns clean, concise type line for cards."""
         if not self.type_line:
@@ -151,8 +163,7 @@ class Card(db.Model):
             return tl.split(" // ")[0].strip()
         return tl
 
-    @property
-    def color_bucket(self) -> str:
+    def compute_color_bucket(self) -> str:
         """Resolves physical binder color section: W, U, B, R, G, Multicolor, Colorless, Land."""
         tl = (self.type_line or "").lower()
         if "land" in tl:
@@ -182,6 +193,11 @@ class Card(db.Model):
             if single in ("W", "U", "B", "R", "G"):
                 return single
             return "Colorless"
+
+    @property
+    def color_bucket(self) -> str:
+        """Returns persisted color bucket or computes from card attributes."""
+        return self.color_bucket_col or self.compute_color_bucket()
 
     @property
     def computed_cmc(self) -> float:
@@ -370,4 +386,60 @@ class ActivityLog(db.Model):
 
     def __repr__(self) -> str:
         return f"<ActivityLog id={self.id} action={self.action!r} email={self.user_email!r}>"
+
+
+@event.listens_for(Card, "before_insert")
+@event.listens_for(Card, "before_update")
+def _populate_card_classifications(mapper, connection, target: Card) -> None:
+    target.color_bucket_col = target.compute_color_bucket()
+    target.primary_type_col = target.compute_primary_card_type()
+
+
+class ApiToken(db.Model):
+    """Per-user bearer/query token for authenticating /mcp requests."""
+
+    __tablename__ = "api_tokens"
+
+    id = db.Column(Integer, primary_key=True)
+    user_id = db.Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    label = db.Column(String(100), nullable=False, default="Gemini")
+    token_hash = db.Column(String(64), unique=True, nullable=False)
+    token_prefix = db.Column(String(12), nullable=False)
+    created_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    last_used_at = db.Column(DateTime(timezone=True), nullable=True)
+    revoked_at = db.Column(DateTime(timezone=True), nullable=True)
+
+    user = db.relationship("User", back_populates="api_tokens")
+
+    def __repr__(self) -> str:
+        return f"<ApiToken id={self.id} user={self.user_id} prefix={self.token_prefix!r}>"
+
+
+class Job(db.Model):
+    """Durable DB-backed background job queue for Meeple lookups, Discord batches, and Drive imports."""
+
+    __tablename__ = "jobs"
+
+    KINDS = ("meeple_lookup", "discord_notify", "drive_import")
+
+    id = db.Column(Integer, primary_key=True)
+    kind = db.Column(String(30), nullable=False)
+    ref_id = db.Column(Integer, nullable=True)
+    payload = db.Column(Text, nullable=True)
+    status = db.Column(String(12), nullable=False, default="pending")  # pending | running | done | failed
+    run_after = db.Column(DateTime(timezone=True), nullable=False, default=utc_now)
+    attempts = db.Column(Integer, nullable=False, default=0)
+    max_attempts = db.Column(Integer, nullable=False, default=3)
+    locked_at = db.Column(DateTime(timezone=True), nullable=True)
+    last_error = db.Column(Text, nullable=True)
+    created_at = db.Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    finished_at = db.Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_jobs_due", "status", "kind", "run_after"),
+        Index("idx_jobs_ref", "kind", "ref_id", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Job id={self.id} kind={self.kind!r} ref_id={self.ref_id} status={self.status!r}>"
 

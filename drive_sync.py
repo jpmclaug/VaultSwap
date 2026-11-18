@@ -7,8 +7,6 @@ import hashlib
 import io
 import json
 import logging
-import queue
-import threading
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -513,73 +511,3 @@ def run_drive_import(
             imp.error = str(exc)[:1000]
             imp.finished_at = utc_now()
             db.session.commit()
-
-
-class DriveImportWorker:
-    """Sequential background worker for Google Drive CSV imports."""
-
-    def __init__(self, app=None, drive_client_factory=None, scryfall_factory=None):
-        self.app = app
-        self.drive_client_factory = drive_client_factory or DriveClient
-        self.scryfall_factory = scryfall_factory
-        self._queue: queue.Queue[Tuple[int, str]] = queue.Queue()
-        self._pending_ids: set[int] = set()
-        self._lock = threading.Lock()
-        self._idle_cond = threading.Condition(self._lock)
-        self._thread: Optional[threading.Thread] = None
-
-    def init_app(self, app) -> None:
-        self.app = app
-
-    def _ensure_started(self) -> None:
-        with self._lock:
-            if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(
-                    target=self._run,
-                    name="VaultSwap-DriveWorker",
-                    daemon=True,
-                )
-                self._thread.start()
-
-    def enqueue(self, import_id: int, access_token: str) -> bool:
-        with self._lock:
-            if import_id in self._pending_ids:
-                return False
-            self._pending_ids.add(import_id)
-            self._queue.put((import_id, access_token))
-        self._ensure_started()
-        return True
-
-    def wait_until_idle(self, timeout: float = 10.0) -> bool:
-        import time
-
-        deadline = time.monotonic() + timeout
-        with self._idle_cond:
-            while self._pending_ids or not self._queue.empty():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._idle_cond.wait(timeout=remaining)
-            return True
-
-    def _run(self) -> None:
-        while True:
-            import_id, access_token = self._queue.get()
-            try:
-                if self.app is not None:
-                    with self.app.app_context():
-                        sf = self.scryfall_factory() if self.scryfall_factory else None
-                        run_drive_import(
-                            import_id=import_id,
-                            access_token=access_token,
-                            drive_client=self.drive_client_factory(),
-                            scryfall_provider=sf,
-                        )
-            except Exception as exc:
-                logger.error("DriveImportWorker error on import %s: %s", import_id, exc)
-            finally:
-                with self._idle_cond:
-                    self._pending_ids.discard(import_id)
-                    if not self._pending_ids and self._queue.empty():
-                        self._idle_cond.notify_all()
-                self._queue.task_done()

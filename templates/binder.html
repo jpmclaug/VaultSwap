@@ -62,7 +62,19 @@
     </div>
 
     <!-- Search, View Switcher & Action Controls Toolbar -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 space-y-2.5 shadow-sm">
+    <form id="binder-filters"
+          hx-get="{{ url_for('binder_view') }}"
+          hx-trigger="change, submit"
+          hx-target="#binder-list"
+          hx-swap="outerHTML"
+          hx-push-url="true"
+          onsubmit="return false;"
+          class="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 space-y-2.5 shadow-sm">
+        <input type="hidden" id="filter-input-status" name="filter" value="{{ active_filter }}">
+        <input type="hidden" id="filter-input-color" name="color" value="{{ color_filter }}">
+        <input type="hidden" id="filter-input-type" name="type" value="{{ type_filter }}">
+        <input type="hidden" id="filter-input-view" name="view" value="{{ view_mode }}">
+
         <!-- Top Row: Search Input + View Switcher + Focus + Bulk Toggle -->
         <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
             <div class="relative flex-1 min-w-[180px]">
@@ -78,7 +90,8 @@
                        hx-trigger="keyup changed delay:250ms, search"
                        hx-target="#binder-list"
                        hx-swap="outerHTML"
-                       hx-vals='{"filter": "{{ active_filter }}", "color": "{{ color_filter }}", "type": "{{ type_filter }}", "finish": "{{ finish_filter }}", "sort": "{{ sort_mode }}", "group": "{{ group_by }}", "view": "{{ view_mode }}"}'
+                       hx-include="#binder-filters"
+                       hx-push-url="true"
                        class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500">
             </div>
 
@@ -115,7 +128,7 @@
 
         <!-- Controls Row: Sort, Group By, Finish -->
         <div class="grid grid-cols-3 gap-2">
-            <select id="binder-sort-select" onchange="sortBinderItems(this.value)"
+            <select id="binder-sort-select" name="sort"
                     class="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-emerald-400 focus:outline-none focus:border-emerald-500 truncate">
                 <option value="default" {% if sort_mode == 'default' %}selected{% endif %}>Sort: Default</option>
                 <option value="price_desc" {% if sort_mode == 'price_desc' %}selected{% endif %}>Sort: Price High &rarr; Low</option>
@@ -129,7 +142,7 @@
                 <option value="set_asc" {% if sort_mode == 'set_asc' %}selected{% endif %}>Sort: Set Code</option>
             </select>
 
-            <select id="binder-group-select" onchange="setBinderGroupBy(this.value)"
+            <select id="binder-group-select" name="group"
                     class="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-amber-300 focus:outline-none focus:border-amber-400 truncate">
                 <option value="none" {% if group_by == 'none' %}selected{% endif %}>Group: None (Flat List)</option>
                 <option value="color" {% if group_by == 'color' %}selected{% endif %}>Group: Color (WUBRG / Multi)</option>
@@ -139,7 +152,7 @@
                 <option value="status" {% if group_by == 'status' %}selected{% endif %}>Group: Status</option>
             </select>
 
-            <select id="binder-finish-select" onchange="filterBinderFinish(this.value)"
+            <select id="binder-finish-select" name="finish"
                     class="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-300 focus:outline-none focus:border-emerald-500 truncate">
                 <option value="all" {% if finish_filter == 'all' %}selected{% endif %}>Finish: All</option>
                 <option value="nonfoil" {% if finish_filter == 'nonfoil' %}selected{% endif %}>Nonfoil Only</option>
@@ -209,18 +222,28 @@
                 Land
             </button>
         </div>
-    </div>
+    </form>
 
     <!-- Collapsible Bulk Status Bar -->
     <form id="bulk-status-form" action="{{ url_for('bulk_update_status') }}" method="POST"
           class="hidden bg-slate-900 border border-slate-700 rounded-2xl p-3 space-y-2.5 shadow-xl">
-        <input type="hidden" name="filter" value="{{ active_filter }}">
-        <input type="hidden" name="q" value="{{ search_q }}">
-        <div class="flex items-center justify-between text-xs">
-            <span class="font-bold text-slate-200">Bulk Tag Selected Cards</span>
-            <button type="button" onclick="selectAllVisible()" class="text-emerald-400 font-semibold hover:underline">
-                Select Visible
-            </button>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="select_all" id="bulk-select-all-input" value="">
+        <input type="hidden" name="filter" id="bulk-filter-status" value="{{ active_filter }}">
+        <input type="hidden" name="q" id="bulk-filter-q" value="{{ search_q }}">
+        <input type="hidden" name="color" id="bulk-filter-color" value="{{ color_filter }}">
+        <input type="hidden" name="type" id="bulk-filter-type" value="{{ type_filter }}">
+        <input type="hidden" name="finish" id="bulk-filter-finish" value="{{ finish_filter }}">
+        <div class="flex items-center justify-between text-xs gap-2 flex-wrap">
+            <span class="font-bold text-slate-200" id="bulk-status-label">Bulk Tag Selected Cards</span>
+            <div class="flex items-center gap-3">
+                <button type="button" onclick="selectAllVisible()" class="text-slate-300 font-semibold hover:underline">
+                    Select Loaded
+                </button>
+                <button type="button" onclick="selectAllMatching()" id="bulk-select-all-btn" class="text-emerald-400 font-semibold hover:underline">
+                    Select all {{ total_matches|default(items|length) }} matching
+                </button>
+            </div>
         </div>
         <div class="grid grid-cols-3 gap-2">
             <button type="submit" name="status" value="private"
@@ -263,10 +286,51 @@
         applyBulkCheckboxVisibility();
     }
 
+    function syncBulkFilters() {
+        const setVal = (destId, srcId) => {
+            const dest = document.getElementById(destId);
+            const src = document.getElementById(srcId);
+            if (dest && src) dest.value = src.value;
+        };
+        setVal('bulk-filter-status', 'filter-input-status');
+        setVal('bulk-filter-q', 'vault-search-input');
+        setVal('bulk-filter-color', 'filter-input-color');
+        setVal('bulk-filter-type', 'filter-input-type');
+        const finSrc = document.getElementById('binder-finish-select');
+        const finDest = document.getElementById('bulk-filter-finish');
+        if (finSrc && finDest) finDest.value = finSrc.value;
+    }
+
     function selectAllVisible() {
+        const sa = document.getElementById('bulk-select-all-input');
+        if (sa) sa.value = '';
+        const lbl = document.getElementById('bulk-status-label');
+        if (lbl) lbl.textContent = 'Bulk Tag Selected Cards';
         const boxes = document.querySelectorAll('input[name="item_ids"]');
-        const allChecked = Array.from(boxes).every(b => b.checked);
+        const allChecked = boxes.length > 0 && Array.from(boxes).every(b => b.checked);
         boxes.forEach(b => { b.checked = !allChecked; });
     }
+
+    function selectAllMatching() {
+        syncBulkFilters();
+        const sa = document.getElementById('bulk-select-all-input');
+        const listEl = document.getElementById('binder-list');
+        const total = listEl?.dataset?.totalMatches || '?';
+        if (sa) sa.value = '1';
+        const lbl = document.getElementById('bulk-status-label');
+        if (lbl) lbl.textContent = `All ${total} matching cards selected`;
+        document.querySelectorAll('input[name="item_ids"]').forEach(b => { b.checked = true; });
+    }
+
+    document.addEventListener('change', (e) => {
+        if (e.target && e.target.name === 'item_ids' && !e.target.checked) {
+            const sa = document.getElementById('bulk-select-all-input');
+            if (sa && sa.value === '1') {
+                sa.value = '';
+                const lbl = document.getElementById('bulk-status-label');
+                if (lbl) lbl.textContent = 'Bulk Tag Selected Cards';
+            }
+        }
+    });
 </script>
 {% endblock %}

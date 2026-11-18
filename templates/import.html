@@ -17,6 +17,7 @@
     <section class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
         <h2 class="text-sm font-bold text-white">Quick Card Add</h2>
         <form action="{{ url_for('import_cards') }}" method="POST" class="space-y-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="relative">
                 <input type="text" id="single-card-input" name="single_card_name" autocomplete="off"
                        placeholder="Type card name (e.g. Rhystic Study)"
@@ -67,6 +68,7 @@
             <p class="text-[11px] text-slate-400">One card per line — supports set codes and <code class="text-slate-300">*F*</code> markers</p>
         </div>
         <form action="{{ url_for('import_cards') }}" method="POST" class="space-y-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <textarea name="quick_text" rows="5"
                       placeholder="1 Sol Ring&#10;2x Counterspell (CMM) 81&#10;1 Rhystic Study [WOT] 25 *F*"
                       class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white placeholder-slate-500 font-mono focus:outline-none focus:border-emerald-500">{{ quick_text or '' }}</textarea>
@@ -84,6 +86,7 @@
             <p class="text-[11px] text-slate-400">Export directly from ManaBox on your phone and upload the <code class="text-slate-300">.csv</code></p>
         </div>
         <form action="{{ url_for('import_cards') }}" method="POST" enctype="multipart/form-data" class="space-y-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <label class="block border-2 border-dashed border-slate-700 hover:border-emerald-500/60 rounded-2xl p-5 text-center cursor-pointer transition bg-slate-950/60">
                 <input type="file" name="csv_file" accept=".csv,text/csv" required class="hidden"
                        onchange="document.getElementById('csv-filename').textContent = this.files[0]?.name || 'Tap to choose ManaBox .csv'">
@@ -244,9 +247,13 @@
         }
 
         async function startServerImport(payload) {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
             const resp = await fetch('{{ url_for("import_from_drive") }}', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken
+                },
                 body: JSON.stringify(payload)
             });
             const text = await resp.text();

@@ -118,6 +118,7 @@
     <section id="section-users" class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-sm">
         <h2 class="text-sm font-bold text-white">Invite Pod User</h2>
         <form action="{{ url_for('admin_users') }}" method="POST" class="space-y-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div>
                 <label class="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Google Email</label>
                 <input type="email" name="email" required placeholder="friend@gmail.com"
@@ -182,6 +183,7 @@
 
             {% if u.is_pending and u.id != current_user.id %}
             <form action="{{ url_for('admin_revoke_user', user_id=u.id) }}" method="POST" class="shrink-0">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit"
                         class="px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 border border-rose-800/70 text-rose-200 text-xs font-semibold transition">
                     Revoke

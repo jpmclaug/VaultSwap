@@ -53,7 +53,20 @@
     {% endif %}
 
     <!-- In-Person Trade Toolbar: Search, View Switcher & Action Controls -->
-    <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 space-y-2.5 shadow-sm">
+    <form id="binder-filters"
+          hx-get="{{ url_for('pod_feed') }}"
+          hx-trigger="change, submit"
+          hx-target="#pod-feed-list"
+          hx-swap="outerHTML"
+          hx-push-url="true"
+          onsubmit="return false;"
+          class="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 space-y-2.5 shadow-sm">
+        <input type="hidden" id="filter-input-status" name="status" value="{{ status_filter }}">
+        <input type="hidden" id="filter-input-owner" name="owner_id" value="{{ selected_owner_id or '' }}">
+        <input type="hidden" id="filter-input-color" name="color" value="{{ color_filter }}">
+        <input type="hidden" id="filter-input-type" name="type" value="{{ type_filter }}">
+        <input type="hidden" id="filter-input-view" name="view" value="{{ view_mode }}">
+
         <!-- Top Row: Search Input + View Switcher + Focus Toggle -->
         <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
             <div class="relative flex-1 min-w-[180px]">
@@ -69,7 +82,8 @@
                        hx-trigger="keyup changed delay:250ms, search"
                        hx-target="#pod-feed-list"
                        hx-swap="outerHTML"
-                       hx-vals='{"status": "{{ status_filter }}", "owner_id": "{{ selected_owner_id or "" }}", "color": "{{ color_filter }}", "type": "{{ type_filter }}", "finish": "{{ finish_filter }}", "sort": "{{ sort_mode }}", "group": "{{ group_by }}", "view": "{{ view_mode }}"}'
+                       hx-include="#binder-filters"
+                       hx-push-url="true"
                        class="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-400">
             </div>
 
@@ -100,7 +114,7 @@
 
         <!-- Controls Row: Sort, Group By, Finish -->
         <div class="grid grid-cols-3 gap-2">
-            <select id="binder-sort-select" onchange="sortBinderItems(this.value)"
+            <select id="binder-sort-select" name="sort"
                     class="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-emerald-400 focus:outline-none focus:border-emerald-500 truncate">
                 <option value="default" {% if sort_mode == 'default' %}selected{% endif %}>Sort: Default (Meeple First)</option>
                 <option value="price_desc" {% if sort_mode == 'price_desc' %}selected{% endif %}>Sort: Price High &rarr; Low</option>
@@ -114,7 +128,7 @@
                 <option value="set_asc" {% if sort_mode == 'set_asc' %}selected{% endif %}>Sort: Set Code</option>
             </select>
 
-            <select id="binder-group-select" onchange="setBinderGroupBy(this.value)"
+            <select id="binder-group-select" name="group"
                     class="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-amber-300 focus:outline-none focus:border-amber-400 truncate">
                 <option value="none" {% if group_by == 'none' %}selected{% endif %}>Group: None (Flat List)</option>
                 <option value="color" {% if group_by == 'color' %}selected{% endif %}>Group: Color (WUBRG / Multi)</option>
@@ -125,7 +139,7 @@
                 <option value="status" {% if group_by == 'status' %}selected{% endif %}>Group: Status</option>
             </select>
 
-            <select id="binder-finish-select" onchange="filterBinderFinish(this.value)"
+            <select id="binder-finish-select" name="finish"
                     class="bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-300 focus:outline-none focus:border-amber-400 truncate">
                 <option value="all" {% if finish_filter == 'all' %}selected{% endif %}>Finish: All</option>
                 <option value="nonfoil" {% if finish_filter == 'nonfoil' %}selected{% endif %}>Nonfoil Only</option>
@@ -195,7 +209,7 @@
                 Land
             </button>
         </div>
-    </div>
+    </form>
 
     <!-- Multi-View Pod Trade Feed Container (Detail Rows / Art Grid / Compact Checklist) -->
     {% include "partials/pod_feed_list.html" %}

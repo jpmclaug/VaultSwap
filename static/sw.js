@@ -1,5 +1,5 @@
 // VaultSwap Progressive Web App Service Worker
-const CACHE_VERSION = 'vaultswap-v1';
+const CACHE_VERSION = 'vaultswap-v2';
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

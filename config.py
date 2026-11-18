@@ -72,8 +72,9 @@ def _build_engine_options(db_uri: str, pooled_url: str = "") -> dict:
 class Config:
     """Base Flask configuration for VaultSwap."""
 
-    SECRET_KEY = os.getenv("SECRET_KEY", "vaultswap-dev-secret-key-mtg")
+    SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
     PERMANENT_SESSION_LIFETIME = timedelta(days=30)
+    WTF_CSRF_TIME_LIMIT = None
 
     # Neon PostgreSQL & Neon Auth Configuration
     DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -119,3 +120,9 @@ class Config:
 
     # Discord Webhook Notification Batching Delay (Default: 300s = 5 minutes)
     DISCORD_WEBHOOK_DELAY_SEC = float(os.getenv("DISCORD_WEBHOOK_DELAY_SEC", 300))
+
+    # Durable DB Job Queue & Cloud Tasks Dispatcher
+    CLOUD_TASKS_QUEUE = os.getenv("CLOUD_TASKS_QUEUE", "").strip()
+    TASKS_INVOKER_SA = os.getenv("TASKS_INVOKER_SA", "").strip()
+    TASKS_SHARED_SECRET = os.getenv("TASKS_SHARED_SECRET", "").strip()
+    JOB_DISPATCHER = os.getenv("JOB_DISPATCHER", "auto").strip().lower()
